@@ -1,0 +1,10 @@
+[package]
+name = "ast-graph-resolve"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ast-graph-core = { path = "../ast-graph-core" }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rustc-hash = { workspace = true }

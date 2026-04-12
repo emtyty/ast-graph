@@ -1,0 +1,21 @@
+[package]
+name = "ast-graph-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ast-graph"
+path = "src/main.rs"
+
+[dependencies]
+ast-graph-core = { path = "../ast-graph-core" }
+ast-graph-parse = { path = "../ast-graph-parse" }
+ast-graph-resolve = { path = "../ast-graph-resolve" }
+ast-graph-storage = { path = "../ast-graph-storage" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+indicatif = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }

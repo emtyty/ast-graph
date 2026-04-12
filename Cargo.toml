@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ast-graph-core",
+    "crates/ast-graph-parse",
+    "crates/ast-graph-resolve",
+    "crates/ast-graph-storage",
+    "crates/ast-graph-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# Core
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+
+# Hashing
+sha2 = "0.10"
+rustc-hash = "2"
+
+# Tree-sitter
+tree-sitter = "0.24"
+
+# SQLite
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# File walking
+walkdir = "2"
+ignore = "0.4"
+
+# Parallelism
+rayon = "1.10"
+
+# Progress
+indicatif = "0.17"
+
+# Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

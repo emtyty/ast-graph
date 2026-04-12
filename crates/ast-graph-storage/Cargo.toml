@@ -1,0 +1,13 @@
+[package]
+name = "ast-graph-storage"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ast-graph-core = { path = "../ast-graph-core" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+rustc-hash = { workspace = true }

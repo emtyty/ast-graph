@@ -1,0 +1,22 @@
+[package]
+name = "ast-graph-parse"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ast-graph-core = { path = "../ast-graph-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-rust = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-c-sharp = "0.23"
+walkdir = { workspace = true }
+ignore = { workspace = true }
+rayon = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+rustc-hash = { workspace = true }
