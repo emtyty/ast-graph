@@ -1,123 +1,113 @@
 # ast-graph
 
-A fast, self-contained codebase visualizer that compresses source code into an interactive graph. Uses **tree-sitter** for multi-language AST parsing, **SQLite** for storage, and **Cytoscape.js** for browser-based visualization.
+A fast, self-contained codebase intelligence tool. Uses **tree-sitter** for multi-language AST parsing and **SQLite** for storage. Parse any codebase → extract its structural skeleton (functions, classes, imports, calls) → query it instantly from the CLI.
 
-Parse any codebase → extract only the structural skeleton (functions, classes, imports, calls) → store relationships in SQLite → explore as an interactive graph.
+```bash
+ast-graph scan ./my-project
+ast-graph symbol "TeamOnSetService"
+ast-graph hotspots
+```
 
 ## Features
 
 - **Multi-language** — Rust, Python, JavaScript/TypeScript, C# (.NET)
-- **AST compression** — strips full syntax trees down to ~10% structural nodes only
+- **AST compression** — strips full syntax trees down to structural nodes only (~90% reduction)
+- **Class-context-aware resolution** — `this.method()` / `self.method()` calls resolve to the correct class, not every method with that name across the codebase
 - **Cross-file resolution** — resolves function calls, imports, type references, inheritance across files
-- **Interactive graph UI** — force-directed layout with community coloring, hover highlighting, click-to-expand
-- **Progressive loading** — starts from entry points, double-click to explore deeper
-- **SQL queries** — run arbitrary SQL against the graph database
+- **Symbol lookup** — find any symbol by partial name, instantly see callers, callees, members
+- **SQL escape hatch** — run arbitrary SQL against the graph database
 - **AI context export** — compact skeleton format for feeding into LLMs
-- **Zero dependencies** — no Docker, no external databases, just a single binary + SQLite file
-- **Incremental** — only re-parses changed files on re-scan
+- **Zero external dependencies** — no Docker, no external databases, single binary + SQLite file
+- **Incremental scan** — only re-parses changed files on re-scan
 
 ## Quick Start
 
 ```bash
-# Build
 cargo build --release
 
 # Scan a project
 ./target/release/ast-graph scan /path/to/your/project
 
-# Launch web UI
-./target/release/ast-graph serve --port 8080 --open
+# Look up a symbol
+./target/release/ast-graph symbol "MyService"
+
+# Find architectural hotspots
+./target/release/ast-graph hotspots
 ```
-
-Open `http://localhost:8080` — you'll see your codebase as an interactive graph.
-
-## Screenshots
-
-The web UI renders your codebase as a force-directed graph:
-- Nodes = symbols (functions, classes, structs, traits, interfaces, enums)
-- Node size = number of connections (hub nodes are larger)
-- Node color = directory/module group
-- Edges = relationships (calls, imports, extends, implements)
-- Hover a node to highlight its neighborhood
-- Double-click to expand and load more connections
-- Right panel: groups, filters, node detail, SQL console
 
 ## CLI Commands
 
 ```
-ast-graph scan <path>              Scan a directory and build the code graph
-ast-graph serve [--port 8080]      Start the web UI server
-ast-graph export --format <fmt>    Export graph (json, dot, ai-context)
-ast-graph stats                    Show graph statistics
-ast-graph hotspots [--limit 20]    Most connected symbols (architectural hotspots)
-ast-graph call-chain <name>        Trace call chain from a function
-ast-graph query "<sql>"            Run a SQL query against the graph DB
+ast-graph scan <path>                 Scan a directory and build the code graph
+ast-graph symbol <name>               Look up a symbol — callers, callees, members
+ast-graph hotspots [--limit 20]       Most connected symbols (architectural hotspots)
+ast-graph call-chain <name>           Trace call chain from a function (recursive)
+ast-graph query "<sql>"               Run a SQL query against the graph DB
+ast-graph stats                       Graph summary: nodes, edges, languages
+ast-graph export --format <fmt>       Export graph (json, dot, ai-context)
 ```
 
-### Examples
+All commands accept `--db <path>` to point at a specific database file.
+
+## Symbol Lookup
+
+The `symbol` command is the primary way to explore the graph:
 
 ```bash
-# Scan and launch UI
-ast-graph scan ./my-project --clean
-ast-graph serve --port 3000 --open
+# Find all nodes matching a partial name
+ast-graph symbol "TeamOnSet"
 
-# Find architectural hotspots
-ast-graph hotspots --limit 10
+# Exact class — shows all members + callers + callees
+ast-graph symbol "TeamOnSetService"
 
-# Trace what a function calls (3 levels deep)
-ast-graph call-chain main --depth 3
+# Specific method — shows callers and callees
+ast-graph symbol "TeamOnSetService.openTeamOnSet"
 
-# Export compact skeleton for AI/LLM context
-ast-graph export --format ai-context --max-tokens 4000
+# Focus on one section
+ast-graph symbol "FinalSelectionV2Component" --members
+ast-graph symbol "FinalSelectionV2Component.addFiles" --callers
+ast-graph symbol "FinalSelectionV2Component.addFiles" --callees
+```
 
-# Export DOT format for Graphviz
-ast-graph export --format dot --output graph.dot
+Example output:
 
-# Run SQL queries
-ast-graph query "SELECT name, kind FROM nodes WHERE kind = 'Class' ORDER BY name"
-ast-graph query "SELECT n.name, COUNT(e.target_id) as calls
-                 FROM nodes n JOIN edges e ON e.source_id = n.id
+```
+┌─ TeamOnSetService.openTeamOnSet [Method]
+│  File: src/renderer/app/services/team-on-set.service.ts L27-65
+│  Sig:  openTeamOnSet(config: any, newTeamOnSets?: Array<UserModel>)
+│
+├─ Callers (5):
+│  ← PageContainerComponent.openTeamOnSet @ src/renderer/app/pages/...
+│  ← UploadV2Component.openTeamOnSet @ src/renderer/app/pages/...
+│  ← KelvinIdleReactionService.resetAndShowTeamOnSetDialog @ ...
+│  ...
+│
+└─ Calls (4):
+   → IntegrationEventService.sendEventScreen [Method] @ ...
+   → SharedTeamOnSetComponent.onChangeTeamOnSet [Method] @ ...
+   ...
+```
+
+## SQL Queries
+
+```bash
+# All classes in a file
+ast-graph query "SELECT name, line_start, line_end FROM nodes
+                 WHERE file_path LIKE '%team-on-set%' AND kind != 'Import'
+                 ORDER BY line_start"
+
+# Most-called methods
+ast-graph query "SELECT n.name, COUNT(*) as callers
+                 FROM edges e JOIN nodes n ON n.id = e.target_id
                  WHERE e.kind = 'CALLS'
-                 GROUP BY n.id ORDER BY calls DESC LIMIT 10"
+                 GROUP BY n.id ORDER BY callers DESC LIMIT 10"
+
+# All callers of a specific method
+ast-graph query "SELECT n.name, n.file_path
+                 FROM edges e JOIN nodes n ON n.id = e.source_id
+                 WHERE e.target_id = (SELECT id FROM nodes WHERE name = 'MyClass.myMethod')
+                 AND e.kind = 'CALLS'"
 ```
-
-## Web UI
-
-The graph view provides:
-
-| Feature | How |
-|---|---|
-| **Explore** | Double-click a node to expand its connections |
-| **Hover** | Hover to highlight a node's neighborhood |
-| **Search** | `Ctrl+K` to search symbols by name |
-| **Filter by kind** | Dropdown: Function, Class, Struct, Trait, etc. |
-| **Filter by language** | Dropdown: Rust, Python, JS, TS, C# |
-| **Toggle edge types** | Checkboxes: Calls, Imports, Extends, etc. |
-| **Groups** | Click a group in the sidebar to toggle visibility |
-| **Node detail** | Click a node to see signature, file, edges |
-| **SQL console** | Run queries directly in the browser |
-| **Export PNG** | Click PNG button to download a screenshot |
-
-## AI Context Export
-
-The `ai-context` format produces a compact codebase skeleton for LLM consumption:
-
-```
-# Project (rust, typescript) — 494 symbols, 1644 relationships
-
-## src/parser.rs
-  pub fn parse_file(path: &Path) -> Result<ParsedFile>  [L12-L45]
-    calls: extract_symbols, resolve_imports
-    called_by: scan_directory
-  pub struct ParsedFile { symbols: Vec<Symbol> }  [L47-L50]
-
-## src/graph.rs
-  pub fn build_graph(files: Vec<ParsedFile>) -> CodeGraph  [L22-L60]
-    calls: merge_symbols, resolve_cross_file
-    called_by: cli::scan::run
-```
-
-Use `--max-tokens` to fit within LLM context windows.
 
 ## Architecture
 
@@ -128,8 +118,6 @@ ast-graph/
     ast-graph-parse/      tree-sitter parsing + per-language extractors
     ast-graph-resolve/    Cross-file import/call/type resolution
     ast-graph-storage/    SQLite persistence + graph queries (recursive CTEs)
-    ast-graph-server/     axum HTTP server + embedded SPA (rust-embed)
-    ast-graph-web/        TypeScript SPA (Cytoscape.js + esbuild)
     ast-graph-cli/        CLI binary (clap)
 ```
 
@@ -139,94 +127,108 @@ ast-graph/
 Source Files
     │
     ▼
-tree-sitter Parse (parallel, per-file)
+tree-sitter Parse (parallel, rayon)
     │
     ▼
-AST Compress (keep only structural nodes: fn, class, import, call)
+AST Compress — keep only structural nodes (fn, class, import, call)
     │
     ▼
-Build Graph (nodes = symbols, edges = relationships)
+Build Graph — nodes = symbols, edges = raw relationships
     │
     ▼
-Cross-file Resolve (match call targets, imports, types across files)
+Cross-file Resolve — match call targets across files
+  1. Exact match on full qualified name (e.g. "ClassName.method")
+  2. Strip :: namespace prefix (Rust)
+  3. Name-only fallback
     │
     ▼
-Store in SQLite → Serve Web UI / Export
+Store in SQLite — nodes, edges, file_hashes tables
 ```
+
+### Resolution Quality
+
+Methods are stored as `ClassName.methodName` for all languages. Call targets are qualified at extraction time:
+
+- `this.save()` inside `MyComponent` → stored as `MyComponent.save` → exact match in resolver
+- `self.process()` inside `MyService` → stored as `MyService.process` → exact match
+- `this.dialog.open()` (chained) → falls back to name-only
+
+This eliminates the false-positive explosion where `this.save()` would previously match every `save()` method in the codebase.
 
 ### SQLite Schema
 
 ```sql
--- Nodes: every symbol in the codebase
 CREATE TABLE nodes (
     id          TEXT PRIMARY KEY,   -- stable hash of (file, name, kind, line)
-    name        TEXT NOT NULL,
-    kind        TEXT NOT NULL,      -- Function, Class, Struct, Trait, etc.
+    name        TEXT NOT NULL,      -- qualified: "ClassName.methodName"
+    kind        TEXT NOT NULL,      -- Function, Class, Method, Struct, Trait, etc.
     file_path   TEXT NOT NULL,
     line_start  INTEGER NOT NULL,
     line_end    INTEGER NOT NULL,
-    signature   TEXT,               -- e.g. "pub fn parse(path: &Path) -> Result<T>"
+    signature   TEXT,
+    doc_comment TEXT,
     visibility  TEXT NOT NULL,
-    language    TEXT NOT NULL
+    language    TEXT NOT NULL,
+    parent_id   TEXT                -- NodeId of containing class/module
 );
 
--- Edges: relationships between symbols
 CREATE TABLE edges (
-    source_id   TEXT NOT NULL,
-    target_id   TEXT NOT NULL,
+    source_id   TEXT NOT NULL REFERENCES nodes(id),
+    target_id   TEXT NOT NULL REFERENCES nodes(id),
     kind        TEXT NOT NULL       -- CALLS, IMPORTS, EXTENDS, IMPLEMENTS, CONTAINS, REFERENCES
+);
+
+CREATE TABLE file_hashes (
+    file_path   TEXT PRIMARY KEY,
+    hash        BLOB NOT NULL       -- SHA-256, used for incremental re-scan
 );
 ```
 
 Graph traversal uses SQLite recursive CTEs:
 
 ```sql
--- Call chain: what does main() call, 3 levels deep?
-WITH RECURSIVE call_tree(id, name, depth) AS (
-    SELECT id, name, 0 FROM nodes WHERE name = 'main'
+-- Call chain: what does openTeamOnSet() call, 3 levels deep?
+WITH RECURSIVE call_tree(id, name, kind, depth) AS (
+    SELECT n.id, n.name, n.kind, 0 FROM nodes n WHERE n.name = 'TeamOnSetService.openTeamOnSet'
     UNION ALL
-    SELECT n.id, n.name, ct.depth + 1
+    SELECT n.id, n.name, n.kind, ct.depth + 1
     FROM call_tree ct
     JOIN edges e ON e.source_id = ct.id AND e.kind = 'CALLS'
     JOIN nodes n ON n.id = e.target_id
     WHERE ct.depth < 3
 )
-SELECT * FROM call_tree WHERE depth > 0;
+SELECT DISTINCT name, kind, depth FROM call_tree WHERE depth > 0 ORDER BY depth, name;
 ```
 
 ## Languages Supported
 
 | Language | Extensions | What's Extracted |
 |---|---|---|
-| **Rust** | `.rs` | fn, struct, enum, trait, impl, use, mod, const |
-| **Python** | `.py` | def, class, import, from...import, decorators |
-| **JavaScript/TypeScript** | `.js/.ts/.tsx` | function, class, arrow fn, import, interface, enum |
-| **C# (.NET)** | `.cs` | class, method, interface, using, namespace, record, enum |
+| **Rust** | `.rs` | fn, struct, enum, trait, impl, use, mod, const, static |
+| **Python** | `.py` | def, class, import, from...import |
+| **JavaScript/TypeScript** | `.js/.ts/.tsx` | function, class, arrow fn, import, interface, enum, type alias |
+| **C# (.NET)** | `.cs` | class, method, constructor, interface, using, namespace, record, enum |
 
-## Building from Source
+## Edge Types
 
-### Prerequisites
+| Edge | Created by | Notes |
+|---|---|---|
+| `CALLS` | Function/method call expressions | Qualified at extraction: `this.x()` → `ClassName.x` |
+| `IMPORTS` | import / using statements | Path and name-based |
+| `EXTENDS` | Class inheritance | Works across files |
+| `IMPLEMENTS` | Interface/trait implementation | Works across files |
+| `CONTAINS` | Parent-child hierarchy | Rust only (via explicit edges); all others use `parent_id` |
+| `REFERENCES` | `new Type()` constructor calls | C# only |
 
-- Rust toolchain (1.70+)
-- Node.js (18+) — only needed to rebuild the web UI
+## Building
 
-### Build
+Requires Rust 1.70+. No other prerequisites.
 
 ```bash
-# Build the Rust binary
-cargo build --release
-
-# (Optional) Rebuild the web UI
-cd crates/ast-graph-web
-npm install
-npm run build
-cp dist/app.js ../ast-graph-server/static/
-cp dist/app.js.map ../ast-graph-server/static/
-cd ../..
 cargo build --release
 ```
 
-The web UI assets are embedded in the binary via `rust-embed` — no separate web server needed.
+The binary is fully self-contained — SQLite is bundled via `rusqlite` with the `bundled` feature.
 
 ## License
 
