@@ -4,7 +4,7 @@ A fast, self-contained codebase intelligence tool. Uses **tree-sitter** for mult
 
 ```bash
 ast-graph scan ./my-project
-ast-graph symbol "TeamOnSetService"
+ast-graph symbol "MyService"
 ast-graph hotspots
 ```
 
@@ -55,37 +55,37 @@ The `symbol` command is the primary way to explore the graph:
 
 ```bash
 # Find all nodes matching a partial name
-ast-graph symbol "TeamOnSet"
+ast-graph symbol "MyService"
 
 # Exact class — shows all members + callers + callees
-ast-graph symbol "TeamOnSetService"
+ast-graph symbol "UserService"
 
 # Specific method — shows callers and callees
-ast-graph symbol "TeamOnSetService.openTeamOnSet"
+ast-graph symbol "UserService.login"
 
 # Focus on one section
-ast-graph symbol "FinalSelectionV2Component" --members
-ast-graph symbol "FinalSelectionV2Component.addFiles" --callers
-ast-graph symbol "FinalSelectionV2Component.addFiles" --callees
+ast-graph symbol "OrderComponent" --members
+ast-graph symbol "OrderComponent.submit" --callers
+ast-graph symbol "OrderComponent.submit" --callees
 ```
 
 Example output:
 
 ```
-┌─ TeamOnSetService.openTeamOnSet [Method]
-│  File: src/renderer/app/services/team-on-set.service.ts L27-65
-│  Sig:  openTeamOnSet(config: any, newTeamOnSets?: Array<UserModel>)
+┌─ UserService.login [Method]
+│  File: src/services/user.service.ts L42-78
+│  Sig:  login(email: string, password: string): Observable<User>
 │
-├─ Callers (5):
-│  ← PageContainerComponent.openTeamOnSet @ src/renderer/app/pages/...
-│  ← UploadV2Component.openTeamOnSet @ src/renderer/app/pages/...
-│  ← KelvinIdleReactionService.resetAndShowTeamOnSetDialog @ ...
-│  ...
+├─ Callers (3):
+│  ← LoginComponent.onSubmit @ src/pages/login/login.component.ts L55
+│  ← AuthGuard.canActivate @ src/guards/auth.guard.ts L22
+│  ← SessionService.restore @ src/services/session.service.ts L18
 │
 └─ Calls (4):
-   → IntegrationEventService.sendEventScreen [Method] @ ...
-   → SharedTeamOnSetComponent.onChangeTeamOnSet [Method] @ ...
-   ...
+   → ApiService.post [Method] @ src/core/services/api.service.ts
+   → TokenService.store [Method] @ src/services/token.service.ts
+   → UserService.setCurrentUser [Method] @ src/services/user.service.ts
+   → LogService.info [Method] @ src/services/log.service.ts
 ```
 
 ## SQL Queries
