@@ -38,6 +38,8 @@ pub fn default_db_path(project_root: &Path) -> PathBuf {
 
 /// Persist an entire CodeGraph into SQLite.
 pub fn save_graph(conn: &Connection, graph: &CodeGraph) -> Result<(usize, usize)> {
+    // Defer FK checks so node insertion order doesn't matter for parent_id refs
+    conn.execute_batch("PRAGMA defer_foreign_keys = ON")?;
     let tx = conn.unchecked_transaction()?;
 
     // Upsert nodes
@@ -48,6 +50,11 @@ pub fn save_graph(conn: &Connection, graph: &CodeGraph) -> Result<(usize, usize)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )?;
         for node in graph.nodes.values() {
+            // Only reference parent if it actually exists in the graph
+            let parent_id = node
+                .parent
+                .filter(|p| graph.nodes.contains_key(p))
+                .map(|p| p.to_string());
             stmt.execute(params![
                 node.id.to_string(),
                 node.name,
@@ -59,14 +66,15 @@ pub fn save_graph(conn: &Connection, graph: &CodeGraph) -> Result<(usize, usize)
                 node.doc_comment,
                 format!("{:?}", node.visibility),
                 node.language.as_str(),
-                node.parent.map(|p| p.to_string()),
+                parent_id,
             ])?;
             node_count += 1;
         }
     }
 
-    // Upsert edges — nodes must be saved first so FK constraints are satisfied
+    // Upsert edges — skip edges referencing nodes not in the graph
     let mut edge_count = 0;
+    let mut skipped = 0;
     {
         let mut stmt = tx.prepare_cached(
             "INSERT OR IGNORE INTO edges (source_id, target_id, kind)
@@ -74,6 +82,12 @@ pub fn save_graph(conn: &Connection, graph: &CodeGraph) -> Result<(usize, usize)
         )?;
         for edges in graph.adjacency.values() {
             for edge in edges {
+                if !graph.nodes.contains_key(&edge.source)
+                    || !graph.nodes.contains_key(&edge.target)
+                {
+                    skipped += 1;
+                    continue;
+                }
                 stmt.execute(params![
                     edge.source.to_string(),
                     edge.target.to_string(),
@@ -82,6 +96,9 @@ pub fn save_graph(conn: &Connection, graph: &CodeGraph) -> Result<(usize, usize)
                 edge_count += 1;
             }
         }
+    }
+    if skipped > 0 {
+        info!("Skipped {} edges with dangling node references", skipped);
     }
 
     // Save file hashes
