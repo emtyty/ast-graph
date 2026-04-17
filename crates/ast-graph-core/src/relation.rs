@@ -39,6 +39,17 @@ impl EdgeKind {
             _ => None,
         }
     }
+
+    /// Every variant, for iteration (e.g. per-kind batching in Cypher).
+    pub const ALL: &'static [EdgeKind] = &[
+        EdgeKind::Contains,
+        EdgeKind::Calls,
+        EdgeKind::Imports,
+        EdgeKind::Extends,
+        EdgeKind::Implements,
+        EdgeKind::References,
+        EdgeKind::OverridesMethod,
+    ];
 }
 
 impl fmt::Display for EdgeKind {
@@ -53,6 +64,10 @@ pub struct Edge {
     pub source: NodeId,
     pub target: NodeId,
     pub kind: EdgeKind,
+    /// Line in the source file where this edge originates (e.g. the call site
+    /// for a CALLS edge, the `use` statement for IMPORTS). Zero for edges
+    /// that have no meaningful line (e.g. structural CONTAINS edges).
+    pub source_line: u32,
 }
 
 /// An unresolved edge with a string-based target (pre-resolution).
@@ -63,4 +78,5 @@ pub struct RawEdge {
     pub kind: EdgeKind,
     pub target_name: String,
     pub target_module: Option<String>,
+    pub source_line: u32,
 }

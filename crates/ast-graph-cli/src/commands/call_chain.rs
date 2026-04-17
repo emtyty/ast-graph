@@ -1,30 +1,25 @@
 use anyhow::Result;
-use std::path::Path;
+use ast_graph_storage::GraphStorage;
 
-pub fn run(name: &str, depth: i32, db_path: Option<&Path>) -> Result<()> {
-    let canon = Path::new(".").canonicalize()?;
-    let db_file = db_path
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| ast_graph_storage::default_db_path(&canon));
-    let conn = ast_graph_storage::open_db(&db_file)?;
+pub fn run(name: &str, depth: i32, storage: &dyn GraphStorage) -> Result<()> {
+    // Disambiguate by name via the backend's built-in symbol search.
+    let matches = storage.find_symbols(name, 5)?;
+    let funcs: Vec<&serde_json::Value> = matches
+        .iter()
+        .filter(|m| {
+            let k = m["kind"].as_str().unwrap_or("");
+            k == "Function" || k == "Method" || k == "Constructor"
+        })
+        .collect();
 
-    // Find the node ID by name
-    let results = ast_graph_storage::run_sql(
-        &conn,
-        &format!(
-            "SELECT id, name, kind FROM nodes WHERE name LIKE '%{}%' AND kind IN ('Function', 'Method') LIMIT 5",
-            name.replace('\'', "''")
-        ),
-    )?;
-
-    if results.is_empty() {
+    if funcs.is_empty() {
         println!("No function matching '{}' found. Run 'ast-graph scan .' first.", name);
         return Ok(());
     }
 
-    if results.len() > 1 {
+    if funcs.len() > 1 {
         println!("Multiple matches found:");
-        for r in &results {
+        for r in &funcs {
             println!(
                 "  {} ({}) - {}",
                 r["name"].as_str().unwrap_or("?"),
@@ -35,12 +30,12 @@ pub fn run(name: &str, depth: i32, db_path: Option<&Path>) -> Result<()> {
         println!();
     }
 
-    let node_id = results[0]["id"].as_str().unwrap_or("");
-    let node_name = results[0]["name"].as_str().unwrap_or(name);
+    let node_id = funcs[0]["id"].as_str().unwrap_or("");
+    let node_name = funcs[0]["name"].as_str().unwrap_or(name);
 
     println!("Call chain from '{}' (depth {}):\n", node_name, depth);
 
-    let chain = ast_graph_storage::call_chain(&conn, node_id, depth)?;
+    let chain = storage.call_chain(node_id, depth)?;
 
     if chain.is_empty() {
         println!("  (no outgoing calls found)");
@@ -48,11 +43,17 @@ pub fn run(name: &str, depth: i32, db_path: Option<&Path>) -> Result<()> {
         for entry in &chain {
             let d = entry["depth"].as_i64().unwrap_or(0);
             let indent = "  ".repeat(d as usize);
+            let line_hint = entry["call_line"]
+                .as_i64()
+                .filter(|l| *l > 0)
+                .map(|l| format!(" @L{}", l))
+                .unwrap_or_default();
             println!(
-                "{}{} ({})",
+                "{}{} ({}){}",
                 indent,
                 entry["name"].as_str().unwrap_or("?"),
                 entry["kind"].as_str().unwrap_or("?"),
+                line_hint,
             );
         }
     }

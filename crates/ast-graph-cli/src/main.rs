@@ -1,8 +1,15 @@
 mod commands;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use ast_graph_storage::GraphStorage;
+use clap::{Parser, Subcommand, ValueEnum};
+use std::path::{Path, PathBuf};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum BackendArg {
+    Sqlite,
+    Falkor,
+}
 
 #[derive(Parser)]
 #[command(name = "ast-graph", about = "AST Compressor + Graph Visualizer")]
@@ -10,9 +17,28 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    /// Path to SQLite database (default: .ast-graph/graph.db in project root)
+    /// Which database backend to use.
+    #[arg(long, value_enum, default_value_t = BackendArg::Sqlite, global = true)]
+    backend: BackendArg,
+
+    /// Path to SQLite database (default: .ast-graph/graph.db in project root).
+    /// Only used when --backend=sqlite.
     #[arg(long, global = true)]
     db: Option<PathBuf>,
+
+    /// FalkorDB connection URL (e.g. "falkor://127.0.0.1:6379").
+    /// Only used when --backend=falkor.
+    #[arg(
+        long,
+        global = true,
+        env = "FALKOR_URL",
+        default_value = "falkor://127.0.0.1:6379"
+    )]
+    falkor_url: String,
+
+    /// FalkorDB graph name.
+    #[arg(long, global = true, default_value = "code_graph")]
+    falkor_graph_name: String,
 }
 
 #[derive(Subcommand)]
@@ -42,10 +68,10 @@ enum Commands {
         max_tokens: Option<usize>,
     },
 
-    /// Run a SQL query against the graph database
+    /// Run a backend-native query (SQL for SQLite, Cypher for FalkorDB)
     Query {
-        /// SQL query string
-        sql: String,
+        /// Query string
+        query: String,
     },
 
     /// Show graph statistics
@@ -91,6 +117,27 @@ enum Commands {
     },
 }
 
+/// Build the chosen backend. For SQLite we resolve the default path against
+/// the scan target when available, otherwise against the current directory.
+fn build_storage(cli: &Cli, fallback_root: &Path) -> Result<Box<dyn GraphStorage>> {
+    match cli.backend {
+        BackendArg::Sqlite => {
+            let db_file = cli
+                .db
+                .clone()
+                .unwrap_or_else(|| ast_graph_storage::default_db_path(fallback_root));
+            ast_graph_storage::open_sqlite(&db_file)
+        }
+        BackendArg::Falkor => {
+            let cfg = ast_graph_storage::FalkorConfig {
+                url: cli.falkor_url.clone(),
+                graph_name: cli.falkor_graph_name.clone(),
+            };
+            ast_graph_storage::open_falkor(cfg)
+        }
+    }
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -101,31 +148,48 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Export doesn't touch storage — it's a pure parse+resolve pipeline.
+    if let Commands::Export {
+        format,
+        output,
+        max_tokens,
+    } = &cli.command
+    {
+        return commands::export::run(format, output.as_deref(), *max_tokens);
+    }
+
+    // Resolve the default SQLite path against the scan target when available.
+    let fallback_root = match &cli.command {
+        Commands::Scan { path, .. } => Path::new(path).canonicalize()?,
+        _ => Path::new(".").canonicalize()?,
+    };
+    let storage = build_storage(&cli, &fallback_root)?;
+
     match cli.command {
         Commands::Scan { path, clean } => {
-            commands::scan::run(&path, cli.db.as_deref(), clean)?;
+            commands::scan::run(&path, storage.as_ref(), clean)?;
         }
-        Commands::Export {
-            format,
-            output,
-            max_tokens,
-        } => {
-            commands::export::run(&format, output.as_deref(), max_tokens)?;
-        }
-        Commands::Query { sql } => {
-            commands::query::run(&sql, cli.db.as_deref())?;
+        Commands::Export { .. } => unreachable!("handled above"),
+        Commands::Query { query } => {
+            commands::query::run(&query, storage.as_ref())?;
         }
         Commands::Stats => {
-            commands::stats::run(cli.db.as_deref())?;
+            commands::stats::run(storage.as_ref())?;
         }
         Commands::Hotspots { limit } => {
-            commands::hotspots::run(limit, cli.db.as_deref())?;
+            commands::hotspots::run(limit, storage.as_ref())?;
         }
         Commands::CallChain { name, depth } => {
-            commands::call_chain::run(&name, depth, cli.db.as_deref())?;
+            commands::call_chain::run(&name, depth, storage.as_ref())?;
         }
-        Commands::Symbol { name, callers, callees, members, limit } => {
-            commands::symbol::run(&name, callers, callees, members, limit, cli.db.as_deref())?;
+        Commands::Symbol {
+            name,
+            callers,
+            callees,
+            members,
+            limit,
+        } => {
+            commands::symbol::run(&name, callers, callees, members, limit, storage.as_ref())?;
         }
     }
 

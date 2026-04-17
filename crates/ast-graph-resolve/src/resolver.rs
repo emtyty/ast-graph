@@ -25,6 +25,7 @@ pub fn resolve_edges(graph: &mut CodeGraph) {
                             source: raw.source,
                             target,
                             kind: EdgeKind::Contains,
+                            source_line: raw.source_line,
                         });
                         resolved += 1;
                         continue;
@@ -39,6 +40,7 @@ pub fn resolve_edges(graph: &mut CodeGraph) {
                             source: raw.source,
                             target,
                             kind: EdgeKind::Calls,
+                            source_line: raw.source_line,
                         });
                         resolved += 1;
                     }
@@ -53,6 +55,7 @@ pub fn resolve_edges(graph: &mut CodeGraph) {
                             source: raw.source,
                             target,
                             kind: EdgeKind::Imports,
+                            source_line: raw.source_line,
                         });
                         resolved += 1;
                     }
@@ -67,6 +70,7 @@ pub fn resolve_edges(graph: &mut CodeGraph) {
                             source: raw.source,
                             target,
                             kind: raw.kind,
+                            source_line: raw.source_line,
                         });
                         resolved += 1;
                     }
@@ -81,6 +85,7 @@ pub fn resolve_edges(graph: &mut CodeGraph) {
                             source: raw.source,
                             target,
                             kind: EdgeKind::References,
+                            source_line: raw.source_line,
                         });
                         resolved += 1;
                     }

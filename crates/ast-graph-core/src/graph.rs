@@ -58,6 +58,7 @@ impl CodeGraph {
             source: edge.target,
             target: edge.source,
             kind: edge.kind,
+            source_line: edge.source_line,
         };
         self.adjacency.entry(edge.source).or_default().push(fwd);
         self.reverse_adj.entry(edge.target).or_default().push(rev);

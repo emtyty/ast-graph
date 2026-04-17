@@ -67,12 +67,14 @@ fn walk_node(
             "function_item" => {
                 if let Some(sym) = extract_function(source, &child, file_path, parent_id) {
                     let id = sym.id;
+                    let line = child.start_position().row as u32;
                     symbols.push(sym);
                     raw_edges.push(RawEdge {
                         source: parent_id,
                         kind: EdgeKind::Contains,
                         target_name: id.to_string(),
                         target_module: None,
+                        source_line: line,
                     });
                     extract_calls(source, &child, id, raw_edges);
                 }
@@ -80,12 +82,14 @@ fn walk_node(
             "struct_item" => {
                 if let Some(sym) = extract_struct(source, &child, file_path, parent_id) {
                     let id = sym.id;
+                    let line = child.start_position().row as u32;
                     symbols.push(sym);
                     raw_edges.push(RawEdge {
                         source: parent_id,
                         kind: EdgeKind::Contains,
                         target_name: id.to_string(),
                         target_module: None,
+                        source_line: line,
                     });
                     extract_fields(source, &child, file_path, id, symbols, raw_edges);
                 }
@@ -362,6 +366,7 @@ fn extract_impl(
             kind: EdgeKind::Implements,
             target_name: trait_name.clone(),
             target_module: None,
+            source_line: node.start_position().row as u32,
         });
     }
 
@@ -450,6 +455,7 @@ fn extract_use(
         kind: EdgeKind::Imports,
         target_name: import_path,
         target_module: None,
+        source_line: node.start_position().row as u32,
     });
 }
 
@@ -500,6 +506,7 @@ fn extract_fields(
                             kind: EdgeKind::References,
                             target_name: type_name,
                             target_module: None,
+                            source_line: child.start_position().row as u32,
                         });
                     }
                 }
@@ -524,6 +531,7 @@ fn extract_calls(
                     kind: EdgeKind::Calls,
                     target_name: call_target.to_string(),
                     target_module: None,
+                    source_line: child.start_position().row as u32,
                 });
             }
         }

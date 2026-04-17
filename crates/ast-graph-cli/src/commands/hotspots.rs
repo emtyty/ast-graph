@@ -1,14 +1,8 @@
 use anyhow::Result;
-use std::path::Path;
+use ast_graph_storage::GraphStorage;
 
-pub fn run(limit: i32, db_path: Option<&Path>) -> Result<()> {
-    let canon = Path::new(".").canonicalize()?;
-    let db_file = db_path
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| ast_graph_storage::default_db_path(&canon));
-    let conn = ast_graph_storage::open_db(&db_file)?;
-
-    let results = ast_graph_storage::hotspots(&conn, limit)?;
+pub fn run(limit: i32, storage: &dyn GraphStorage) -> Result<()> {
+    let results = storage.hotspots(limit)?;
 
     if results.is_empty() {
         println!("No hotspots found. Run 'ast-graph scan .' first.");

@@ -200,6 +200,7 @@ fn extract_js_class(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == "class_heritage" {
+            let heritage_line = child.start_position().row as u32;
             let heritage_text = node_text(source, &child);
             if let Some(base) = heritage_text.strip_prefix("extends ") {
                 let base = base.split_whitespace().next().unwrap_or(base);
@@ -208,6 +209,7 @@ fn extract_js_class(
                     kind: EdgeKind::Extends,
                     target_name: base.to_string(),
                     target_module: None,
+                    source_line: heritage_line,
                 });
             }
             if heritage_text.contains("implements ") {
@@ -218,6 +220,7 @@ fn extract_js_class(
                             kind: EdgeKind::Implements,
                             target_name: iface.trim().to_string(),
                             target_module: None,
+                            source_line: heritage_line,
                         });
                     }
                 }
@@ -314,6 +317,7 @@ fn extract_js_import(
         kind: EdgeKind::Imports,
         target_name: source_module.unwrap_or(text),
         target_module: None,
+        source_line: node.start_position().row as u32,
     });
 }
 
@@ -434,6 +438,7 @@ fn extract_js_calls(
                     kind: EdgeKind::Calls,
                     target_name: call_target,
                     target_module: None,
+                    source_line: child.start_position().row as u32,
                 });
             }
         }

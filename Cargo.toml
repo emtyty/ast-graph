@@ -30,8 +30,12 @@ tree-sitter = "0.24"
 # SQLite
 rusqlite = { version = "0.31", features = ["bundled"] }
 
+# FalkorDB (Redis-module graph database, OpenCypher)
+falkordb = { version = "0.2", features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # File walking
 walkdir = "2"

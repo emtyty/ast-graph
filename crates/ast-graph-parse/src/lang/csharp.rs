@@ -197,6 +197,7 @@ fn extract_cs_class(
                     kind: edge_kind,
                     target_name: base_name.to_string(),
                     target_module: None,
+                    source_line: base_child.start_position().row as u32,
                 });
             }
         }
@@ -489,6 +490,7 @@ fn extract_cs_using(
         kind: EdgeKind::Imports,
         target_name: text,
         target_module: None,
+        source_line: node.start_position().row as u32,
     });
 }
 
@@ -513,6 +515,7 @@ fn extract_cs_calls(
                     kind: EdgeKind::Calls,
                     target_name: call_target,
                     target_module: None,
+                    source_line: child.start_position().row as u32,
                 });
             }
         }
@@ -524,6 +527,7 @@ fn extract_cs_calls(
                     kind: EdgeKind::References,
                     target_name: type_name.to_string(),
                     target_module: None,
+                    source_line: child.start_position().row as u32,
                 });
             }
         }

@@ -1,14 +1,8 @@
 use anyhow::Result;
-use std::path::Path;
+use ast_graph_storage::GraphStorage;
 
-pub fn run(sql: &str, db_path: Option<&Path>) -> Result<()> {
-    let canon = Path::new(".").canonicalize()?;
-    let db_file = db_path
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| ast_graph_storage::default_db_path(&canon));
-    let conn = ast_graph_storage::open_db(&db_file)?;
-
-    let results = ast_graph_storage::run_sql(&conn, sql)?;
+pub fn run(query: &str, storage: &dyn GraphStorage) -> Result<()> {
+    let results = storage.run_raw_query(query)?;
 
     if results.is_empty() {
         println!("(no results)");

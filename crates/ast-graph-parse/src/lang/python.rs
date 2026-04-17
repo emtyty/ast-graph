@@ -191,6 +191,7 @@ fn extract_py_class(
                     kind: EdgeKind::Extends,
                     target_name: base.to_string(),
                     target_module: None,
+                    source_line: arg.start_position().row as u32,
                 });
             }
         }
@@ -237,6 +238,7 @@ fn extract_py_import(
         kind: EdgeKind::Imports,
         target_name: text,
         target_module: None,
+        source_line: node.start_position().row as u32,
     });
 }
 
@@ -278,6 +280,7 @@ fn extract_py_import_from(
         kind: EdgeKind::Imports,
         target_name: text,
         target_module: module_name,
+        source_line: node.start_position().row as u32,
     });
 }
 
@@ -302,6 +305,7 @@ fn extract_py_calls(
                     kind: EdgeKind::Calls,
                     target_name: call_target,
                     target_module: None,
+                    source_line: child.start_position().row as u32,
                 });
             }
         }

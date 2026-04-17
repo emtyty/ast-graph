@@ -1,16 +1,10 @@
 use anyhow::Result;
-use std::path::Path;
+use ast_graph_storage::GraphStorage;
 
-pub fn run(db_path: Option<&Path>) -> Result<()> {
-    let canon = Path::new(".").canonicalize()?;
-    let db_file = db_path
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| ast_graph_storage::default_db_path(&canon));
-    let conn = ast_graph_storage::open_db(&db_file)?;
+pub fn run(storage: &dyn GraphStorage) -> Result<()> {
+    let stats = storage.get_stats()?;
 
-    let stats = ast_graph_storage::get_stats(&conn)?;
-
-    println!("Graph Statistics:");
+    println!("Graph Statistics ({}):", storage.backend_name());
     println!("  Nodes: {}", stats["nodes"]);
     println!("  Edges: {}", stats["edges"]);
     println!("  Files: {}", stats["files"]);
