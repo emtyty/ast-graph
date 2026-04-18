@@ -1,6 +1,6 @@
 # ast-graph
 
-A fast, self-contained codebase intelligence tool. Uses **tree-sitter** for multi-language AST parsing and **SQLite** for storage. Parse any codebase → extract its structural skeleton (functions, classes, imports, calls) → query it instantly from the CLI.
+A fast codebase intelligence tool. Uses **tree-sitter** for multi-language AST parsing and a pluggable storage backend — **SQLite** (zero-setup, single file) or **FalkorDB** (Redis-module graph database, OpenCypher). Parse any codebase → extract its structural skeleton (functions, classes, imports, calls) → query it instantly from the CLI.
 
 ```bash
 ast-graph scan ./my-project
@@ -15,9 +15,10 @@ ast-graph hotspots
 - **Class-context-aware resolution** — `this.method()` / `self.method()` calls resolve to the correct class, not every method with that name across the codebase
 - **Cross-file resolution** — resolves function calls, imports, type references, inheritance across files
 - **Symbol lookup** — find any symbol by partial name, instantly see callers, callees, members
-- **SQL escape hatch** — run arbitrary SQL against the graph database
+- **Pluggable backends** — SQLite for single-machine use, FalkorDB for team/server use with Cypher
+- **SQL / Cypher escape hatch** — run arbitrary SQL (SQLite) or Cypher (FalkorDB) against the graph
 - **AI context export** — compact skeleton format for feeding into LLMs
-- **Zero external dependencies** — no Docker, no external databases, single binary + SQLite file
+- **Self-contained default** — SQLite backend needs no Docker or external services; single binary + `.db` file
 - **Incremental scan** — only re-parses changed files on re-scan
 
 ## Quick Start
@@ -42,12 +43,19 @@ ast-graph scan <path>                 Scan a directory and build the code graph
 ast-graph symbol <name>               Look up a symbol — callers, callees, members
 ast-graph hotspots [--limit 20]       Most connected symbols (architectural hotspots)
 ast-graph call-chain <name>           Trace call chain from a function (recursive)
-ast-graph query "<sql>"               Run a SQL query against the graph DB
+ast-graph query "<sql|cypher>"        Run a backend-native query (SQL for SQLite, Cypher for FalkorDB)
 ast-graph stats                       Graph summary: nodes, edges, languages
 ast-graph export --format <fmt>       Export graph (json, dot, ai-context)
 ```
 
-All commands accept `--db <path>` to point at a specific database file.
+**Backend flags** (global, apply to every subcommand):
+
+```
+--backend <sqlite|falkor>             Which storage backend to use (default: sqlite)
+--db <path>                           SQLite database path (sqlite only)
+--falkor-url <url>                    FalkorDB URL, or env FALKOR_URL (default: falkor://127.0.0.1:6379)
+--falkor-graph-name <name>            FalkorDB graph name (default: code_graph)
+```
 
 ## Symbol Lookup
 
@@ -88,7 +96,53 @@ Example output:
    → LogService.info [Method] @ src/services/log.service.ts
 ```
 
-## SQL Queries
+## Storage Backends
+
+ast-graph stores the graph in one of two backends; the CLI is identical across both.
+
+| Backend | Query language | When to use |
+|---|---|---|
+| **SQLite** (default) | SQL + recursive CTEs | Single-developer use, CI pipelines, offline analysis. Zero setup — the database is a single `.db` file. |
+| **FalkorDB** | OpenCypher | Team/server deployments, richer graph queries (`shortestPath`, variable-length patterns), sharing one graph across many clients. |
+
+### SQLite (default)
+
+```bash
+# Implicit sqlite — writes to .ast-graph/graph.db under the scan root
+ast-graph scan ./my-project
+
+# Explicit path
+ast-graph --db ./analysis.db scan ./my-project
+ast-graph --db ./analysis.db symbol MyService
+```
+
+### FalkorDB
+
+FalkorDB is a Redis module. Start it with Docker:
+
+```bash
+docker run -d -p 6379:6379 falkordb/falkordb:latest
+```
+
+Then point ast-graph at it via `--backend falkor`:
+
+```bash
+# Scan into FalkorDB (clears the prior graph)
+ast-graph --backend falkor scan ./my-project --clean
+
+# All subsequent commands take the same flag
+ast-graph --backend falkor symbol MyService
+ast-graph --backend falkor hotspots --limit 20
+ast-graph --backend falkor call-chain MyService.login --depth 3
+
+# Or set the URL once via env — no need to pass --falkor-url
+export FALKOR_URL="falkor://my-host:6379"
+ast-graph --backend falkor stats
+```
+
+All nodes carry the `:Symbol` label and all relationships expose a `line` property pointing at the call site (0 if no meaningful line).
+
+## SQL Queries (SQLite backend)
 
 ```bash
 # All classes in a file
@@ -109,6 +163,36 @@ ast-graph query "SELECT n.name, n.file_path
                  AND e.kind = 'CALLS'"
 ```
 
+## Cypher Queries (FalkorDB backend)
+
+```bash
+# Direct callers of a function, with call-site lines
+ast-graph --backend falkor query "
+  MATCH (caller:Symbol)-[r:CALLS]->(target:Symbol {name:'MyService.login'})
+  RETURN caller.name, caller.file_path, r.line
+  ORDER BY caller.file_path, r.line"
+
+# Multi-hop call chain (up to 3 levels) with per-hop line numbers
+ast-graph --backend falkor query "
+  MATCH path = (a:Symbol {name:'MyService.login'})-[r:CALLS*1..3]->(b:Symbol)
+  RETURN [n IN nodes(path) | n.name] AS names,
+         [rel IN relationships(path) | rel.line] AS lines,
+         length(path) AS depth
+  ORDER BY depth"
+
+# Classes implementing an interface (transitive)
+ast-graph --backend falkor query "
+  MATCH (impl:Symbol)-[:IMPLEMENTS*1..5]->(iface:Symbol {name:'IContainer'})
+  RETURN DISTINCT impl.name, impl.file_path"
+
+# Shortest path between two symbols
+# NB: FalkorDB requires shortestPath() inside WITH or RETURN, not MATCH
+ast-graph --backend falkor query "
+  MATCH (a:Symbol {name:'A'}), (b:Symbol {name:'B'})
+  WITH shortestPath((a)-[*..10]-(b)) AS p
+  RETURN [n IN nodes(p) | n.name], length(p)"
+```
+
 ## Architecture
 
 ```
@@ -117,7 +201,8 @@ ast-graph/
     ast-graph-core/       Core types: SymbolNode, Edge, CodeGraph, NodeId
     ast-graph-parse/      tree-sitter parsing + per-language extractors
     ast-graph-resolve/    Cross-file import/call/type resolution
-    ast-graph-storage/    SQLite persistence + graph queries (recursive CTEs)
+    ast-graph-storage/    Pluggable backends: sqlite (recursive CTEs) + falkor (Cypher)
+                          behind a single GraphStorage trait
     ast-graph-cli/        CLI binary (clap)
 ```
 
@@ -142,7 +227,9 @@ Cross-file Resolve — match call targets across files
   3. Name-only fallback
     │
     ▼
-Store in SQLite — nodes, edges, file_hashes tables
+Persist via GraphStorage trait
+  ├─ SQLite  → nodes / edges / file_hashes tables
+  └─ FalkorDB → :Symbol / :FileHash nodes, typed relationships with r.line
 ```
 
 ### Resolution Quality
@@ -200,6 +287,23 @@ WITH RECURSIVE call_tree(id, name, kind, depth) AS (
 SELECT DISTINCT name, kind, depth FROM call_tree WHERE depth > 0 ORDER BY depth, name;
 ```
 
+### FalkorDB Schema
+
+FalkorDB stores the same data as a property graph. Every symbol is a `:Symbol` node; file-content hashes live on `:FileHash` nodes (used only for incremental-scan bookkeeping — ignore them when analyzing code).
+
+| `:Symbol` property | Type | Notes |
+|---|---|---|
+| `id` | string | 16-hex-char stable hash |
+| `name` | string | qualified: `ClassName.methodName` |
+| `kind` | string | `File`, `Class`, `Method`, `Function`, `Interface`, `Package`, … (see [SymbolKind](crates/ast-graph-core/src/symbol.rs)) |
+| `file_path` | string | absolute path |
+| `line_start` / `line_end` | int | definition range |
+| `signature` / `doc_comment` | string? | may be null |
+| `visibility` | string | `Public`, `Private`, `Protected`, `Internal` |
+| `language` | string | `rust`, `python`, `javascript`, `typescript`, `csharp`, `java` |
+
+Relationship types: `CALLS`, `CONTAINS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `OVERRIDES`. Every relationship carries a `line` property — **the source line where the relationship originates** (call site for `CALLS`, not the callee's definition line). `line` is `0` when no meaningful line exists (mostly structural `CONTAINS`).
+
 ## Languages Supported
 
 | Language | Extensions | What's Extracted |
@@ -219,17 +323,18 @@ SELECT DISTINCT name, kind, depth FROM call_tree WHERE depth > 0 ORDER BY depth,
 | `EXTENDS` | Class inheritance | Works across files |
 | `IMPLEMENTS` | Interface/trait implementation | Works across files |
 | `CONTAINS` | Parent-child hierarchy | Rust only (via explicit edges); all others use `parent_id` |
-| `REFERENCES` | `new Type()` constructor calls | C# only |
+| `REFERENCES` | `new Type()` constructor calls | C# and Java |
+| `OVERRIDES` | Method overrides a parent-class method | Emitted where resolver can determine override relationships |
 
 ## Building
 
-Requires Rust 1.70+. No other prerequisites.
+Requires Rust 1.70+. No other prerequisites to build or run the SQLite backend.
 
 ```bash
 cargo build --release
 ```
 
-The binary is fully self-contained — SQLite is bundled via `rusqlite` with the `bundled` feature.
+The binary is self-contained for the SQLite backend — SQLite is bundled via `rusqlite` with the `bundled` feature. The FalkorDB backend is also compiled in (via the `falkordb` crate with `tokio`) and only needs a reachable FalkorDB server at runtime; nothing extra to install on the client side.
 
 ## License
 
