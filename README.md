@@ -338,4 +338,6 @@ The binary is self-contained for the SQLite backend — SQLite is bundled via `r
 
 ## License
 
-MIT
+**Commercial — all rights reserved.** ast-graph is distributed under a proprietary commercial license; it is **not** open source.
+
+A license is required for any use, including internal evaluation, internal tooling, or embedding in commercial products. For licensing terms and pricing, contact [linh@creativeforce.io](mailto:linh@creativeforce.io).
