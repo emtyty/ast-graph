@@ -35,6 +35,9 @@ pub trait GraphStorage: Send + Sync {
 
     fn get_stats(&self) -> Result<serde_json::Value>;
     fn call_chain(&self, node_id: &str, max_depth: i32) -> Result<Vec<serde_json::Value>>;
+    /// Reverse of `call_chain`: finds all upstream callers up to `max_depth` hops
+    /// (who calls this, and who calls those, and so on).
+    fn reverse_call_chain(&self, node_id: &str, max_depth: i32) -> Result<Vec<serde_json::Value>>;
     fn shortest_path(&self, from_id: &str, to_id: &str) -> Result<Vec<serde_json::Value>>;
     fn find_implementations(&self, trait_name: &str) -> Result<Vec<serde_json::Value>>;
     fn hotspots(&self, limit: i32) -> Result<Vec<serde_json::Value>>;
@@ -42,6 +45,24 @@ pub trait GraphStorage: Send + Sync {
     fn symbol_callers(&self, node_id: &str) -> Result<Vec<serde_json::Value>>;
     fn symbol_callees(&self, node_id: &str) -> Result<Vec<serde_json::Value>>;
     fn symbol_members(&self, node_id: &str) -> Result<Vec<serde_json::Value>>;
+
+    /// Symbols of the given kinds with zero incoming CALLS edges — likely dead code.
+    /// `exclude_path_substrings` lets callers filter out vendored or generated files.
+    fn dead_symbols(
+        &self,
+        kinds: &[&str],
+        exclude_path_substrings: &[&str],
+        limit: i32,
+    ) -> Result<Vec<serde_json::Value>>;
+
+    /// Symbols whose line range intersects `[line_start, line_end]` in `file_path`.
+    /// Used to map a git-diff hunk to the symbols it actually touches.
+    fn symbols_in_range(
+        &self,
+        file_path_substring: &str,
+        line_start: u32,
+        line_end: u32,
+    ) -> Result<Vec<serde_json::Value>>;
 
     /// Execute a backend-native query (SQL for SQLite, Cypher for FalkorDB).
     fn run_raw_query(&self, query: &str) -> Result<Vec<serde_json::Value>>;

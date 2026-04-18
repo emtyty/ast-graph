@@ -1,4 +1,5 @@
 mod commands;
+mod git;
 
 use anyhow::Result;
 use ast_graph_storage::GraphStorage;
@@ -115,6 +116,59 @@ enum Commands {
         #[arg(short, long, default_value = "10")]
         limit: usize,
     },
+
+    /// List functions/methods/constructors with no inbound CALLS edges (likely dead)
+    DeadCode {
+        /// Max results to show
+        #[arg(short, long, default_value = "200")]
+        limit: i32,
+
+        /// Comma-separated list of kinds to include (default: Function,Method,Constructor)
+        #[arg(long)]
+        kinds: Option<String>,
+
+        /// Include vendored/generated files (node_modules, dist/, .min.js, …)
+        #[arg(long)]
+        include_all: bool,
+    },
+
+    /// "If I change X, what else might break?" — reverse call-graph traversal from a symbol
+    BlastRadius {
+        /// Symbol name (partial match supported)
+        name: String,
+
+        /// How many CALLS hops upstream to traverse
+        #[arg(short, long, default_value = "2")]
+        depth: i32,
+
+        /// Also annotate each caller file with its recent git churn
+        #[arg(long)]
+        with_recency: bool,
+
+        /// Window size for --with-recency (days)
+        #[arg(long, default_value = "30")]
+        recency_days: u32,
+
+        /// Path to the git repo (default: current directory)
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+
+    /// Map a git diff to symbols — shows every symbol the diff hunks actually touched
+    ChangedSymbols {
+        /// Base ref to diff against (e.g. "origin/main"). Omit to diff uncommitted
+        /// working-tree changes against HEAD.
+        #[arg(long)]
+        base: Option<String>,
+
+        /// For each changed symbol, also print its direct callers
+        #[arg(long)]
+        callers: bool,
+
+        /// Path to the git repo (default: current directory)
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
 }
 
 /// Build the chosen backend. For SQLite we resolve the default path against
@@ -190,6 +244,45 @@ fn main() -> Result<()> {
             limit,
         } => {
             commands::symbol::run(&name, callers, callees, members, limit, storage.as_ref())?;
+        }
+        Commands::DeadCode {
+            limit,
+            kinds,
+            include_all,
+        } => {
+            commands::dead_code::run(storage.as_ref(), limit, kinds.as_deref(), include_all)?;
+        }
+        Commands::BlastRadius {
+            name,
+            depth,
+            with_recency,
+            recency_days,
+            repo,
+        } => {
+            let repo_root = match repo {
+                Some(p) => p,
+                None => Path::new(".").canonicalize()?,
+            };
+            commands::blast_radius::run(
+                &name,
+                depth,
+                storage.as_ref(),
+                with_recency,
+                recency_days,
+                &repo_root,
+            )?;
+        }
+        Commands::ChangedSymbols { base, callers, repo } => {
+            let repo_root = match repo {
+                Some(p) => p,
+                None => Path::new(".").canonicalize()?,
+            };
+            commands::changed_symbols::run(
+                storage.as_ref(),
+                base.as_deref(),
+                &repo_root,
+                callers,
+            )?;
         }
     }
 

@@ -16,6 +16,7 @@ ast-graph hotspots
 - **Cross-file resolution** — resolves function calls, imports, type references, inheritance across files
 - **Symbol lookup** — find any symbol by partial name, instantly see callers, callees, members
 - **Pluggable backends** — SQLite for single-machine use, FalkorDB for team/server use with Cypher
+- **Git-aware analysis** — `blast-radius`, `changed-symbols`, and `dead-code` bring PR review and refactor planning onto the graph
 - **SQL / Cypher escape hatch** — run arbitrary SQL (SQLite) or Cypher (FalkorDB) against the graph
 - **AI context export** — compact skeleton format for feeding into LLMs
 - **Self-contained default** — SQLite backend needs no Docker or external services; single binary + `.db` file
@@ -94,6 +95,10 @@ ast-graph scan <path>                 Scan a directory and build the code graph
 ast-graph symbol <name>               Look up a symbol — callers, callees, members
 ast-graph hotspots [--limit 20]       Most connected symbols (architectural hotspots)
 ast-graph call-chain <name>           Trace call chain from a function (recursive)
+ast-graph blast-radius <name>         Reverse traversal: "if I change X, what else breaks?"
+ast-graph changed-symbols [--base <ref>]
+                                      Map a git diff to the symbols it actually touched
+ast-graph dead-code                   Functions / methods with zero incoming CALLS edges
 ast-graph query "<sql|cypher>"        Run a backend-native query (SQL for SQLite, Cypher for FalkorDB)
 ast-graph stats                       Graph summary: nodes, edges, languages
 ast-graph export --format <fmt>       Export graph (json, dot, ai-context)
@@ -146,6 +151,75 @@ Example output:
    → UserService.setCurrentUser [Method] @ src/services/user.service.ts
    → LogService.info [Method] @ src/services/log.service.ts
 ```
+
+## Git-aware analysis
+
+Three commands use the graph to answer questions that grep can't, tied to what you're changing right now.
+
+### `blast-radius` — "if I change X, what else breaks?"
+
+Reverse traversal of the CALLS graph from any symbol, N hops upstream. Lists every caller and ranks files by how many callers they contain.
+
+```bash
+ast-graph blast-radius TokenService.validate --depth 3
+
+# Add --with-recency to annotate each caller's file with git churn
+# (commit count in the last 30 days, plus "last touched" age)
+ast-graph blast-radius TokenService.validate --depth 2 --with-recency
+ast-graph blast-radius TokenService.validate --with-recency --recency-days 90
+```
+
+The "recency" signal is the interesting part: a symbol with 200 callers that hasn't changed in two years is architecturally stable. A symbol with 200 callers that was touched 11 times in the last month is **on fire** — same blast radius, much higher review priority.
+
+### `changed-symbols` — map a git diff to symbols
+
+Reads `git diff --unified=0`, extracts every hunk, and looks up which symbols' line ranges overlap.
+
+```bash
+# Diff the working tree against HEAD (uncommitted changes)
+ast-graph changed-symbols
+
+# Diff against a base ref — typical use case in PR review
+ast-graph changed-symbols --base origin/main
+
+# Also list direct callers of each changed symbol
+ast-graph changed-symbols --base origin/main --callers
+```
+
+Example output:
+
+```
+Changed symbols (origin/main..HEAD) — 12 symbols across 4 file(s):
+
+src/services/user.service.ts
+  L   42-78    Method       UserService.login
+  L   80-95    Method       UserService.refreshToken
+src/services/token.service.ts
+  L   22-40    Method       TokenService.issue
+  L   42-55    Method       TokenService.validate
+...
+```
+
+A reviewer instantly sees that a 300-line diff actually reshapes exactly 12 symbols, concentrated in the auth flow — faster and more accurate than scrolling the diff.
+
+### `dead-code` — functions with no inbound calls
+
+Pure graph query — any Function / Method / Constructor with zero incoming `CALLS` edges is flagged as likely dead.
+
+```bash
+ast-graph dead-code                        # default: 200 results, excludes vendored files
+ast-graph dead-code --limit 50
+ast-graph dead-code --kinds Function,Method,Constructor
+ast-graph dead-code --include-all          # disable vendored-file exclusions
+```
+
+**Interpret with care.** "Likely dead" is a *graph-level* claim and has three known failure modes, which the command prints as caveats:
+
+- **Entry points** (`main`, HTTP handlers, `#[test]` functions, event listeners) have no callers by design.
+- **Dynamic dispatch** — virtual calls, reflection, JS callbacks, framework hooks — is invisible to the graph. Anything invoked through `this.fn.call()`, `QueryList.forEach`, or a trait object's method table won't resolve.
+- **Library APIs** may be called by external consumers the graph never saw.
+
+Review the list as a candidate set, not a deletion list.
 
 ## Storage Backends
 

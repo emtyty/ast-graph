@@ -681,6 +681,146 @@ impl GraphStorage for FalkorStorage {
             .collect())
     }
 
+    fn reverse_call_chain(&self, node_id: &str, max_depth: i32) -> Result<Vec<serde_json::Value>> {
+        let depth = max_depth.clamp(1, 20);
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), cypher_escape_string(node_id));
+        // Upstream callers: follow CALLS edges in reverse direction.
+        let cypher = format!(
+            "MATCH path = (caller:Symbol)-[r:CALLS*1..{depth}]->(target:Symbol {{id: $id}}) \
+             RETURN caller.id, caller.name, caller.kind, caller.file_path, caller.line_start, \
+                    length(path) AS depth, \
+                    [n IN nodes(path) | n.name] AS node_path, \
+                    [rel IN relationships(path) | rel.line][0] AS call_line \
+             ORDER BY depth, caller.name"
+        );
+        let rows = self.run_cypher(&cypher, &params)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                if r.len() < 8 {
+                    return None;
+                }
+                let node_path = match &r[6] {
+                    FalkorValue::Array(a) => a
+                        .iter()
+                        .filter_map(fv_get_string)
+                        .collect::<Vec<_>>()
+                        .join(" -> "),
+                    _ => String::new(),
+                };
+                Some(serde_json::json!({
+                    "id":         fv_get_string(&r[0]).unwrap_or_default(),
+                    "name":       fv_get_string(&r[1]).unwrap_or_default(),
+                    "kind":       fv_get_string(&r[2]).unwrap_or_default(),
+                    "file_path":  fv_get_string(&r[3]).unwrap_or_default(),
+                    "line_start": fv_get_i64(&r[4]),
+                    "depth":      fv_get_i64(&r[5]),
+                    "path":       node_path,
+                    "call_line":  fv_get_i64(&r[7]),
+                }))
+            })
+            .collect())
+    }
+
+    fn dead_symbols(
+        &self,
+        kinds: &[&str],
+        exclude_path_substrings: &[&str],
+        limit: i32,
+    ) -> Result<Vec<serde_json::Value>> {
+        let kinds_list = if kinds.is_empty() {
+            "['Function','Method','Constructor']".to_string()
+        } else {
+            let joined = kinds
+                .iter()
+                .map(|k| format!("'{}'", k.replace('\'', "\\'")))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("[{joined}]")
+        };
+
+        let exclude_clause = exclude_path_substrings
+            .iter()
+            .map(|p| format!(" AND NOT n.file_path CONTAINS '{}'", p.replace('\'', "\\'")))
+            .collect::<Vec<_>>()
+            .join("");
+
+        let lim = limit.max(1);
+        let cypher = format!(
+            "MATCH (n:Symbol) \
+             WHERE n.kind IN {kinds} {exclude} \
+               AND NOT EXISTS((:Symbol)-[:CALLS]->(n)) \
+             RETURN n.id, n.name, n.kind, n.file_path, n.line_start, n.line_end, \
+                    n.signature, n.visibility, n.language \
+             ORDER BY n.file_path, n.line_start \
+             LIMIT {lim}",
+            kinds = kinds_list,
+            exclude = exclude_clause,
+        );
+        let rows = self.run_cypher(&cypher, &HashMap::new())?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                if r.len() < 9 {
+                    return None;
+                }
+                Some(serde_json::json!({
+                    "id":         fv_get_string(&r[0]).unwrap_or_default(),
+                    "name":       fv_get_string(&r[1]).unwrap_or_default(),
+                    "kind":       fv_get_string(&r[2]).unwrap_or_default(),
+                    "file_path":  fv_get_string(&r[3]).unwrap_or_default(),
+                    "line_start": fv_get_i64(&r[4]),
+                    "line_end":   fv_get_i64(&r[5]),
+                    "signature":  fv_get_string(&r[6]),
+                    "visibility": fv_get_string(&r[7]).unwrap_or_default(),
+                    "language":   fv_get_string(&r[8]).unwrap_or_default(),
+                }))
+            })
+            .collect())
+    }
+
+    fn symbols_in_range(
+        &self,
+        file_path_substring: &str,
+        line_start: u32,
+        line_end: u32,
+    ) -> Result<Vec<serde_json::Value>> {
+        let mut params = HashMap::new();
+        params.insert("path".to_string(), cypher_escape_string(file_path_substring));
+        // Splice the integer bounds directly — FalkorDB parameter substitution
+        // for integers is awkward; both are constrained i64 so this is safe.
+        let cypher = format!(
+            "MATCH (n:Symbol) \
+             WHERE n.file_path CONTAINS $path \
+               AND NOT n.kind IN ['File','Import'] \
+               AND n.line_start <= {end} \
+               AND n.line_end   >= {start} \
+             RETURN n.id, n.name, n.kind, n.file_path, n.line_start, n.line_end, n.signature \
+             ORDER BY n.file_path, n.line_start",
+            start = line_start as i64,
+            end = line_end as i64,
+        );
+        let rows = self.run_cypher(&cypher, &params)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                if r.len() < 7 {
+                    return None;
+                }
+                Some(serde_json::json!({
+                    "id":         fv_get_string(&r[0]).unwrap_or_default(),
+                    "name":       fv_get_string(&r[1]).unwrap_or_default(),
+                    "kind":       fv_get_string(&r[2]).unwrap_or_default(),
+                    "file_path":  fv_get_string(&r[3]).unwrap_or_default(),
+                    "line_start": fv_get_i64(&r[4]),
+                    "line_end":   fv_get_i64(&r[5]),
+                    "signature":  fv_get_string(&r[6]),
+                }))
+            })
+            .collect())
+    }
+
     fn shortest_path(&self, from_id: &str, to_id: &str) -> Result<Vec<serde_json::Value>> {
         let mut params = HashMap::new();
         params.insert("from".to_string(), cypher_escape_string(from_id));

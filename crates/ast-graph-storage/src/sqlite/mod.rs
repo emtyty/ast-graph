@@ -379,6 +379,160 @@ impl GraphStorage for SqliteStorage {
         Ok(results)
     }
 
+    fn reverse_call_chain(&self, node_id: &str, max_depth: i32) -> Result<Vec<serde_json::Value>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "
+            WITH RECURSIVE reverse_tree(id, name, kind, file_path, line_start, depth, path, call_line) AS (
+                SELECT n.id, n.name, n.kind, n.file_path, n.line_start, 0, n.name, 0
+                FROM nodes n WHERE n.id = ?1
+
+                UNION ALL
+
+                SELECT n2.id, n2.name, n2.kind, n2.file_path, n2.line_start, rt.depth + 1,
+                       n2.name || ' -> ' || rt.path,
+                       e.source_line
+                FROM reverse_tree rt
+                JOIN edges e ON e.target_id = rt.id AND e.kind = 'CALLS'
+                JOIN nodes n2 ON n2.id = e.source_id
+                WHERE rt.depth < ?2
+            )
+            SELECT DISTINCT id, name, kind, file_path, line_start, depth, path, call_line
+            FROM reverse_tree
+            WHERE depth > 0
+            ORDER BY depth, name
+            ",
+        )?;
+
+        let results: Vec<serde_json::Value> = stmt
+            .query_map(params![node_id, max_depth], |row| {
+                Ok(serde_json::json!({
+                    "id":         row.get::<_, String>(0)?,
+                    "name":       row.get::<_, String>(1)?,
+                    "kind":       row.get::<_, String>(2)?,
+                    "file_path":  row.get::<_, String>(3)?,
+                    "line_start": row.get::<_, i64>(4)?,
+                    "depth":      row.get::<_, i32>(5)?,
+                    "path":       row.get::<_, String>(6)?,
+                    "call_line":  row.get::<_, i64>(7)?,
+                }))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(results)
+    }
+
+    fn dead_symbols(
+        &self,
+        kinds: &[&str],
+        exclude_path_substrings: &[&str],
+        limit: i32,
+    ) -> Result<Vec<serde_json::Value>> {
+        let conn = self.conn.lock().unwrap();
+
+        // Build IN-list for kinds and exclusion predicates inline since
+        // rusqlite slices-of-strings don't bind directly. Inputs are CLI-only,
+        // but we still quote-escape as a belt-and-suspenders.
+        let kinds_list = if kinds.is_empty() {
+            "'Function','Method','Constructor'".to_string()
+        } else {
+            kinds
+                .iter()
+                .map(|k| format!("'{}'", k.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+
+        let exclude_sql: String = exclude_path_substrings
+            .iter()
+            .map(|p| format!(" AND n.file_path NOT LIKE '%{}%'", p.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join("");
+
+        let sql = format!(
+            "
+            SELECT n.id, n.name, n.kind, n.file_path, n.line_start, n.line_end,
+                   n.signature, n.visibility, n.language
+            FROM nodes n
+            WHERE n.kind IN ({kinds})
+              {exclude}
+              AND NOT EXISTS (
+                  SELECT 1 FROM edges e
+                  WHERE e.target_id = n.id AND e.kind = 'CALLS'
+              )
+            ORDER BY n.file_path, n.line_start
+            LIMIT ?1
+            ",
+            kinds = kinds_list,
+            exclude = exclude_sql,
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+        let results: Vec<serde_json::Value> = stmt
+            .query_map(params![limit], |row| {
+                Ok(serde_json::json!({
+                    "id":         row.get::<_, String>(0)?,
+                    "name":       row.get::<_, String>(1)?,
+                    "kind":       row.get::<_, String>(2)?,
+                    "file_path":  row.get::<_, String>(3)?,
+                    "line_start": row.get::<_, i64>(4)?,
+                    "line_end":   row.get::<_, i64>(5)?,
+                    "signature":  row.get::<_, Option<String>>(6)?,
+                    "visibility": row.get::<_, String>(7)?,
+                    "language":   row.get::<_, String>(8)?,
+                }))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(results)
+    }
+
+    fn symbols_in_range(
+        &self,
+        file_path_substring: &str,
+        line_start: u32,
+        line_end: u32,
+    ) -> Result<Vec<serde_json::Value>> {
+        let conn = self.conn.lock().unwrap();
+        // Normalize path separators on both sides so Windows backslash-stored
+        // paths match git's forward-slash output.
+        let normalized = file_path_substring.replace('\\', "/");
+        let like_pattern = format!("%{}%", normalized.replace('\'', "''"));
+        // Overlap: [line_start, line_end] intersects [range_start, range_end]
+        // iff range_start ≤ line_end AND range_end ≥ line_start.
+        let mut stmt = conn.prepare(
+            "SELECT id, name, kind, file_path, line_start, line_end, signature
+             FROM nodes
+             WHERE REPLACE(file_path, '\\', '/') LIKE ?1
+               AND kind NOT IN ('File','Import')
+               AND line_start <= ?3
+               AND line_end   >= ?2
+             ORDER BY file_path, line_start",
+        )?;
+
+        let results: Vec<serde_json::Value> = stmt
+            .query_map(
+                params![like_pattern, line_start as i64, line_end as i64],
+                |row| {
+                    Ok(serde_json::json!({
+                        "id":         row.get::<_, String>(0)?,
+                        "name":       row.get::<_, String>(1)?,
+                        "kind":       row.get::<_, String>(2)?,
+                        "file_path":  row.get::<_, String>(3)?,
+                        "line_start": row.get::<_, i64>(4)?,
+                        "line_end":   row.get::<_, i64>(5)?,
+                        "signature":  row.get::<_, Option<String>>(6)?,
+                    }))
+                },
+            )?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(results)
+    }
+
     fn shortest_path(&self, from_id: &str, to_id: &str) -> Result<Vec<serde_json::Value>> {
         let conn = self.conn.lock().unwrap();
         let max_depth = 15i32;

@@ -5,3 +5,6 @@ pub mod stats;
 pub mod hotspots;
 pub mod call_chain;
 pub mod symbol;
+pub mod dead_code;
+pub mod blast_radius;
+pub mod changed_symbols;
