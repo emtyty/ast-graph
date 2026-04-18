@@ -2,6 +2,7 @@ pub mod rust;
 pub mod python;
 pub mod javascript;
 pub mod csharp;
+pub mod java;
 
 use ast_graph_core::Language;
 use crate::extractor::LanguageExtractor;
@@ -15,5 +16,6 @@ pub fn get_extractor(language: Language) -> Box<dyn LanguageExtractor> {
             Box::new(javascript::JavaScriptExtractor::new(language))
         }
         Language::CSharp => Box::new(csharp::CSharpExtractor),
+        Language::Java => Box::new(java::JavaExtractor),
     }
 }

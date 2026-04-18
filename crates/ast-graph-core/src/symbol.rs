@@ -148,6 +148,7 @@ pub enum Language {
     JavaScript,
     TypeScript,
     CSharp,
+    Java,
 }
 
 impl Language {
@@ -158,6 +159,7 @@ impl Language {
             "js" | "jsx" | "mjs" | "cjs" => Some(Self::JavaScript),
             "ts" | "tsx" => Some(Self::TypeScript),
             "cs" => Some(Self::CSharp),
+            "java" => Some(Self::Java),
             _ => None,
         }
     }
@@ -169,6 +171,7 @@ impl Language {
             Self::JavaScript => "javascript",
             Self::TypeScript => "typescript",
             Self::CSharp => "csharp",
+            Self::Java => "java",
         }
     }
 
@@ -179,6 +182,7 @@ impl Language {
             "javascript" => Some(Self::JavaScript),
             "typescript" => Some(Self::TypeScript),
             "csharp" => Some(Self::CSharp),
+            "java" => Some(Self::Java),
             _ => None,
         }
     }

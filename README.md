@@ -10,7 +10,7 @@ ast-graph hotspots
 
 ## Features
 
-- **Multi-language** — Rust, Python, JavaScript/TypeScript, C# (.NET)
+- **Multi-language** — Rust, Python, JavaScript/TypeScript, C# (.NET), Java
 - **AST compression** — strips full syntax trees down to structural nodes only (~90% reduction)
 - **Class-context-aware resolution** — `this.method()` / `self.method()` calls resolve to the correct class, not every method with that name across the codebase
 - **Cross-file resolution** — resolves function calls, imports, type references, inheritance across files
@@ -208,6 +208,7 @@ SELECT DISTINCT name, kind, depth FROM call_tree WHERE depth > 0 ORDER BY depth,
 | **Python** | `.py` | def, class, import, from...import |
 | **JavaScript/TypeScript** | `.js/.ts/.tsx` | function, class, arrow fn, import, interface, enum, type alias |
 | **C# (.NET)** | `.cs` | class, method, constructor, interface, using, namespace, record, enum |
+| **Java** | `.java` | class, interface, enum, record, method, constructor, field, import, package, extends, implements |
 
 ## Edge Types
 
