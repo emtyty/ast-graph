@@ -21,6 +21,57 @@ ast-graph hotspots
 - **Self-contained default** — SQLite backend needs no Docker or external services; single binary + `.db` file
 - **Incremental scan** — only re-parses changed files on re-scan
 
+## ast-graph + Claude vs. Claude alone
+
+Benchmark on a real C# codebase (810 files, ~53k LOC, 2026-04-18). Both approaches were asked to produce the same high-level map of the repo.
+
+| | Claude default tools | ast-graph + FalkorDB |
+|---|---|---|
+| Time | 10 min 28 sec | **5 min 38 sec** |
+| Tokens | 84.4k | 86.7k |
+| Tool calls | 88 | 82 |
+
+Both approaches agreed on the structural facts: 810 files, ~1,350 classes, 118 interfaces, ~1,570 methods, 19 REST + 1 gRPC controller, 16 CQRS features, ~48 event handlers, ~48 Kafka consumers, 8 background jobs, 39 enums.
+
+### What each approach is good at
+
+**Claude default tools (grep / read / edit)**
+- Works on any repo instantly, no setup
+- Understands intent — comments, naming, style
+- Follows clues outside code (e.g. `CLAUDE.md`)
+- Actually writes and edits code
+
+**ast-graph + FalkorDB**
+- Fast — queries answer in milliseconds
+- Finds hotspots across the whole codebase
+- Exact counts, no grep false-positives
+- Traces long call chains in one query
+
+### Best approach per action
+
+| Action | Best approach | Why |
+|---|---|---|
+| Explore a codebase | ast-graph | One query, whole-map overview |
+| Find dead code / cycles | ast-graph | Unreferenced nodes show up instantly |
+| Refactor / rename | Claude + ast-graph | Graph lists every caller; Claude edits safely |
+| Write new features | Claude + ast-graph | Graph shows existing patterns; Claude writes the code |
+| Fix bugs | Claude + ast-graph | Graph traces the call chain; Claude patches the file |
+| Unit / integration tests | Claude + ast-graph | Graph maps deps; Claude writes the tests |
+| Code review | Claude + ast-graph | Graph spots structural smells; Claude reads the prose |
+| Architecture docs | Claude + ast-graph | Graph draws the shape; Claude tells the story |
+
+**The combined workflow wins.** Claude reads the graph (via MCP or a system prompt like [graph/CLAUDE.md](../CLAUDE.md)) for exact structure, then writes code. Almost always beats either alone.
+
+### Example hotspots surfaced in that benchmark
+
+```
+139 OUTGOING   UpdatePartialSessionCommandHandler.Handle   top orchestrator; #1 split candidate
+278 INCOMING   SocketHelper.Send                           most-called method in the repo
+483 LINES      UpsertSessionCommandHandler                 largest handler; publishes 3+ events mid-flow
+```
+
+The first two are trivially surfaced by a single Cypher query over `size(()-->(n))` / `size((n)-->())`; the third needs `line_end - line_start` over the graph.
+
 ## Quick Start
 
 ```bash
