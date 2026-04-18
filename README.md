@@ -351,6 +351,6 @@ Commercial tiers:
 | Studio | $349 | up to 5 developers |
 | Platform | $1,999 | org-wide internal deployment |
 
-For commercial licensing, contact [linh@creativeforce.io](mailto:linh@creativeforce.io).
+For commercial licensing, open an issue at [github.com/emtyty/ast-graph/issues](https://github.com/emtyty/ast-graph/issues).
 
 The software is provided "as is", without warranty of any kind — see the disclaimer in [LICENSE](LICENSE).
