@@ -1,6 +1,6 @@
 ast-graph — Dual-Use License
 
-Copyright (c) 2026 Creative Force <linh@creativeforce.io>
+Copyright (c) 2026 ast-graph authors (https://github.com/emtyty/ast-graph)
 All rights reserved.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -32,8 +32,8 @@ license. Commercial purposes include, but are not limited to:
 - Internal tooling that supports revenue-generating operations
 - SaaS, consulting, or agency deployments
 
-Commercial licenses are available by contacting:
-linh@creativeforce.io
+For commercial licensing, open an issue at:
+https://github.com/emtyty/ast-graph/issues
 
   Builder   — $79    (1 developer)
   Studio    — $349   (up to 5 developers)
