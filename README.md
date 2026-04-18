@@ -389,4 +389,19 @@ The binary is self-contained for the SQLite backend — SQLite is bundled via `r
 
 ## License
 
-MIT
+**Dual-Use License.** ast-graph is distributed under a dual-use license — see [LICENSE](LICENSE) for the full terms.
+
+- **Non-commercial use (free).** Personal, academic, and research use is free. You may use, copy, modify, and distribute the software for any non-commercial purpose, provided the copyright notice is preserved.
+- **Commercial use (paid).** Any for-profit use — including use inside a for-profit organization, integration into a paid product or service, internal tooling that supports revenue-generating operations, and SaaS / consulting / agency deployments — requires a paid license.
+
+Commercial tiers:
+
+| Tier | Price | Scope |
+|---|---|---|
+| Builder | $79 | 1 developer |
+| Studio | $349 | up to 5 developers |
+| Platform | $1,999 | org-wide internal deployment |
+
+For commercial licensing, contact [linh@creativeforce.io](mailto:linh@creativeforce.io).
+
+The software is provided "as is", without warranty of any kind — see the disclaimer in [LICENSE](LICENSE).
