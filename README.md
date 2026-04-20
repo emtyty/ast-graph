@@ -2,6 +2,8 @@
 
 A fast codebase intelligence tool. Uses **tree-sitter** for multi-language AST parsing and a pluggable storage backend — **SQLite** (zero-setup, single file) or **FalkorDB** (Redis-module graph database, OpenCypher). Parse any codebase → extract its structural skeleton (functions, classes, imports, calls) → query it instantly from the CLI.
 
+![ast-graph demo](docs/ast-graph-demo.gif)
+
 ```bash
 ast-graph scan ./my-project
 ast-graph symbol "MyService"
