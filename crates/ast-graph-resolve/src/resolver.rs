@@ -165,6 +165,26 @@ pub fn resolve_edges(graph: &mut CodeGraph, root: &std::path::Path) {
                 }
             }
             EdgeKind::Imports => {
+                // Pre-resolved target: when the parser already knows the exact
+                // node this import refers to (e.g. C# `using` pointing at the
+                // file's own Import placeholder), it encodes the NodeId as hex
+                // in target_name. Short-circuit before name-based fallback,
+                // which would otherwise fan the file's :IMPORTS edge out to
+                // every Import node across the project sharing the same text.
+                if raw.target_module.is_none() {
+                    if let Some(target) = NodeId::from_hex(&raw.target_name) {
+                        if graph.nodes.contains_key(&target) {
+                            graph.add_edge(Edge {
+                                source: raw.source,
+                                target,
+                                kind: EdgeKind::Imports,
+                                source_line: raw.source_line,
+                            });
+                            resolved += 1;
+                            continue;
+                        }
+                    }
+                }
                 // target_module holds the computed absolute path for relative imports.
                 // For aliased imports, resolve via tsconfig paths first.
                 let alias_resolved = if raw.target_module.is_none() {

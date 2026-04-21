@@ -485,10 +485,14 @@ fn extract_cs_using(
         parent: Some(parent_id),
     });
 
+    // Use the Import node's own id as the edge target so the resolver links
+    // this file's :IMPORTS to *its* Import node, not to every file-wide Import
+    // whose `name` happens to match (e.g. identical `using System;` lines across
+    // the project). Same hex-NodeId convention that EdgeKind::Contains uses.
     raw_edges.push(RawEdge {
         source: parent_id,
         kind: EdgeKind::Imports,
-        target_name: text,
+        target_name: id.to_string(),
         target_module: None,
         source_line: node.start_position().row as u32,
     });
