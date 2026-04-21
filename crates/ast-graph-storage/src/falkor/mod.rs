@@ -16,6 +16,7 @@ use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 use tokio::runtime::Runtime;
 use tracing::info;
 
@@ -61,9 +62,15 @@ impl FalkorStorage {
             .try_into()
             .map_err(|e| anyhow!("invalid FalkorDB URL {}: {:?}", cfg.url, e))?;
 
+        // TCP keepalive at 30s: without it, long parse/resolve pauses or
+        // slow batches on this connection get the socket silently dropped by
+        // an intermediate box, and the next query hits a dead pool entry.
+        // Matches the pattern the falkordb-rs `main` branch added
+        // `with_tcp_keepalive` for.
         let client = rt.block_on(async {
             FalkorClientBuilder::new_async()
                 .with_connection_info(conn_info)
+                .with_tcp_keepalive(Duration::from_secs(30))
                 .build()
                 .await
         })?;
@@ -99,6 +106,12 @@ impl FalkorStorage {
     }
 
     /// Run a Cypher query and return rows as `Vec<Vec<FalkorValue>>`.
+    ///
+    /// Retries once on ConnectionDown: the FalkorDB client's async pool
+    /// auto-replaces the dropped socket but still surfaces the first error.
+    /// Parse/resolve takes several seconds of wall time while our connection
+    /// sits idle, which is long enough for the server/LB to close it, so
+    /// the first save-phase query can reliably hit a dead connection.
     fn run_cypher(
         &self,
         cypher: &str,
@@ -109,20 +122,44 @@ impl FalkorStorage {
         let cypher = cypher.to_string();
         let params = params.clone();
         self.rt.block_on(async {
-            let mut graph = self.client.select_graph(&graph_name);
-            let qb = graph.query(cypher);
-            let result = if params.is_empty() {
-                qb.execute().await?
-            } else {
-                qb.with_params(&params).execute().await?
-            };
-            let mut rows: Vec<Vec<FalkorValue>> = Vec::new();
-            for row in result.data {
-                rows.push(row);
+            for attempt in 0..2 {
+                let mut graph = self.client.select_graph(&graph_name);
+                let qb = graph.query(cypher.clone());
+                let res = if params.is_empty() {
+                    qb.execute().await
+                } else {
+                    qb.with_params(&params).execute().await
+                };
+                match res {
+                    Ok(result) => {
+                        let mut rows: Vec<Vec<FalkorValue>> = Vec::new();
+                        for row in result.data {
+                            rows.push(row);
+                        }
+                        return Ok(rows);
+                    }
+                    Err(e) if attempt == 0 && is_connection_error(&e) => {
+                        tracing::warn!("FalkorDB connection dropped, retrying once: {e}");
+                        continue;
+                    }
+                    Err(e) => return Err(anyhow!(e)),
+                }
             }
-            Ok::<_, anyhow::Error>(rows)
+            unreachable!("retry loop exits via return")
         })
     }
+}
+
+/// True if the error is one we should retry (connection dropped / pool
+/// returned a dead handle). Anything else (syntax error, dangling ref,
+/// etc.) must still propagate.
+fn is_connection_error(e: &falkordb::FalkorDBError) -> bool {
+    matches!(
+        e,
+        falkordb::FalkorDBError::ConnectionDown
+            | falkordb::FalkorDBError::NoConnection
+            | falkordb::FalkorDBError::EmptyConnection
+    )
 }
 
 // -------- Cypher literal helpers (for inlined batch writes) ---------------
@@ -149,22 +186,6 @@ fn cypher_opt_string(s: &Option<String>) -> String {
         Some(v) => cypher_escape_string(v),
         None => "null".to_string(),
     }
-}
-
-fn node_cypher_literal(node: &SymbolNode) -> String {
-    format!(
-        "{{id:{id},name:{name},kind:{kind},file_path:{fp},line_start:{ls},line_end:{le},signature:{sig},doc_comment:{doc},visibility:{vis},language:{lang}}}",
-        id = cypher_escape_string(&node.id.to_string()),
-        name = cypher_escape_string(&node.name),
-        kind = cypher_escape_string(node.kind.as_neo4j_label()),
-        fp = cypher_escape_string(&node.file_path.to_string_lossy()),
-        ls = node.line_range.0,
-        le = node.line_range.1,
-        sig = cypher_opt_string(&node.signature),
-        doc = cypher_opt_string(&node.doc_comment),
-        vis = cypher_escape_string(&format!("{:?}", node.visibility)),
-        lang = cypher_escape_string(node.language.as_str()),
-    )
 }
 
 // -------- FalkorValue -> serde_json::Value conversion ---------------------
@@ -229,14 +250,34 @@ impl GraphStorage for FalkorStorage {
     }
 
     fn save_graph(&self, graph: &CodeGraph) -> Result<(usize, usize)> {
-        // 1. Batch-upsert nodes via a single UNWIND.
+        // 1. Upsert nodes via UNWIND batches.
+        //
+        //    We tried going one MERGE per node but the FalkorDB tokio
+        //    connection couldn't survive the round-trip count on a
+        //    lighthouse-scale repo (~55k nodes → connection drop mid-save).
+        //    Small batches keep the query string modest while letting the
+        //    connection breathe.
         if !graph.nodes.is_empty() {
-            const NODE_BATCH: usize = 500;
+            const NODE_BATCH: usize = 200;
             let nodes: Vec<&SymbolNode> = graph.nodes.values().collect();
             for chunk in nodes.chunks(NODE_BATCH) {
                 let list = chunk
                     .iter()
-                    .map(|n| node_cypher_literal(n))
+                    .map(|n| {
+                        format!(
+                            "{{id:{id},name:{name},kind:{kind},file_path:{fp},line_start:{ls},line_end:{le},signature:{sig},doc_comment:{doc},visibility:{vis},language:{lang}}}",
+                            id = cypher_escape_string(&n.id.to_string()),
+                            name = cypher_escape_string(&n.name),
+                            kind = cypher_escape_string(n.kind.as_neo4j_label()),
+                            fp = cypher_escape_string(&n.file_path.to_string_lossy()),
+                            ls = n.line_range.0,
+                            le = n.line_range.1,
+                            sig = cypher_opt_string(&n.signature),
+                            doc = cypher_opt_string(&n.doc_comment),
+                            vis = cypher_escape_string(&format!("{:?}", n.visibility)),
+                            lang = cypher_escape_string(n.language.as_str()),
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(",");
                 let cypher = format!(
@@ -251,11 +292,7 @@ impl GraphStorage for FalkorStorage {
             }
         }
 
-        // 2. parent_id links (Contains) — handled via edges below, but we also
-        //    record CONTAINS edges when the parser emitted them. No separate
-        //    parent linking step is needed.
-
-        // 3. Batch-upsert edges per kind (Cypher has no dynamic rel-type).
+        // 2. Upsert edges one at a time (per kind, so the rel-type is static).
         //    For CONTAINS we additionally synthesize parent→child edges from
         //    each node's `parent` field so queries like
         //      (c:Class)-[:CONTAINS]->(m:Method)
@@ -264,7 +301,6 @@ impl GraphStorage for FalkorStorage {
         let mut edge_count = 0usize;
         let mut skipped = 0usize;
         for kind in EdgeKind::ALL {
-            const EDGE_BATCH: usize = 1000;
             let kind_str = kind.as_neo4j_type();
             let mut all_of_kind: Vec<(String, String, u32)> = Vec::new();
             for edges in graph.adjacency.values() {
@@ -298,6 +334,10 @@ impl GraphStorage for FalkorStorage {
                     }
                 }
             }
+            // Edges stay batched via UNWIND — at repository scale we can see
+            // hundreds of thousands of edges, and sending them one-by-one
+            // outlived the FalkorDB connection on a lighthouse-sized repo.
+            const EDGE_BATCH: usize = 1000;
             for chunk in all_of_kind.chunks(EDGE_BATCH) {
                 let list = chunk
                     .iter()
@@ -565,7 +605,21 @@ impl GraphStorage for FalkorStorage {
     }
 
     fn clear(&self) -> Result<()> {
-        self.run_cypher("MATCH (n) DETACH DELETE n", &HashMap::new())?;
+        // GRAPH.DELETE drops the whole graph server-side in one shot. The
+        // earlier `MATCH (n) DETACH DELETE n` approach couldn't survive on a
+        // graph with hundreds of thousands of nodes — the connection died
+        // before the query finished.
+        let _guard = self.lock.lock().unwrap();
+        let graph_name = self.graph_name.clone();
+        self.rt.block_on(async {
+            let mut graph = self.client.select_graph(&graph_name);
+            // Ignore "graph doesn't exist" errors — clear on a fresh DB is fine.
+            let _ = graph.delete().await;
+            Ok::<_, anyhow::Error>(())
+        })?;
+        drop(_guard);
+        // Re-create indexes since GRAPH.DELETE drops them too.
+        self.init_schema()?;
         Ok(())
     }
 
