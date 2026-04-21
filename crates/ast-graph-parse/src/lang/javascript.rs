@@ -81,9 +81,9 @@ fn walk_js(
                 // Recurse into exported declarations
                 walk_js(source, &child, file_path, parent_id, lang, symbols, raw_edges);
             }
-            "lexical_declaration" => {
-                // Handle: const foo = () => {} or const Foo = function() {}
-                extract_js_variable_fn(source, &child, file_path, parent_id, lang, symbols, raw_edges);
+            "lexical_declaration" | "variable_declaration" => {
+                // const/let/var - arrow fns, factory calls, new expressions, objects, etc.
+                extract_js_variable(source, &child, file_path, parent_id, lang, symbols, raw_edges);
             }
             "interface_declaration" | "type_alias_declaration" => {
                 extract_js_type(source, &child, file_path, parent_id, lang, symbols);
@@ -270,6 +270,18 @@ fn extract_js_class(
                     if let Some(body) = child_by_field(&child, "body") {
                         extract_js_calls(source, &body, method_id, Some(name), raw_edges);
                     }
+                    // Fix 1.3: also extract calls from property-assigned arrow/function values
+                    if child.kind() == "public_field_definition" {
+                        if let Some(value) = child_by_field(&child, "value") {
+                            if value.kind() == "arrow_function" || value.kind() == "function" {
+                                if let Some(fn_body) = child_by_field(&value, "body") {
+                                    extract_js_calls(source, &fn_body, method_id, Some(name), raw_edges);
+                                } else {
+                                    extract_js_calls(source, &value, method_id, Some(name), raw_edges);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -312,16 +324,28 @@ fn extract_js_import(
         parent: Some(parent_id),
     });
 
+    let module_str = source_module.unwrap_or_else(|| text.clone());
+    // For relative imports, compute the absolute path so the resolver can do
+    // a file-path lookup instead of a fragile name-only match.
+    let abs_module_path = if module_str.starts_with('.') {
+        file_path.parent().map(|dir| {
+            dir.join(&module_str)
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+    } else {
+        None
+    };
     raw_edges.push(RawEdge {
         source: parent_id,
         kind: EdgeKind::Imports,
-        target_name: source_module.unwrap_or(text),
-        target_module: None,
+        target_name: module_str,
+        target_module: abs_module_path,
         source_line: node.start_position().row as u32,
     });
 }
 
-fn extract_js_variable_fn(
+fn extract_js_variable(
     source: &[u8],
     node: &tree_sitter::Node,
     file_path: &Path,
@@ -332,31 +356,38 @@ fn extract_js_variable_fn(
 ) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.kind() == "variable_declarator" {
-            let name_node = match child_by_field(&child, "name") {
-                Some(n) => n,
-                None => continue,
-            };
-            let value = match child_by_field(&child, "value") {
-                Some(v) => v,
-                None => continue,
-            };
+        if child.kind() != "variable_declarator" {
+            continue;
+        }
+        let name_node = match child_by_field(&child, "name") {
+            Some(n) => n,
+            None => continue,
+        };
+        // Skip non-identifier patterns (e.g. destructuring) for now
+        if name_node.kind() != "identifier" {
+            continue;
+        }
+        let name = node_text(source, &name_node).to_string();
 
-            // Only extract if the value is a function expression or arrow function
-            if value.kind() == "arrow_function" || value.kind() == "function" {
-                let name = node_text(source, &name_node);
+        let value = match child_by_field(&child, "value") {
+            Some(v) => v,
+            None => continue,
+        };
+
+        match value.kind() {
+            "arrow_function" | "function" => {
                 let params = child_by_field(&value, "parameters")
                     .map(|p| node_text(source, &p).to_string())
                     .unwrap_or_else(|| "()".to_string());
 
                 let id = NodeId::new(
-                    &file_path.to_string_lossy(), name, SymbolKind::Function,
+                    &file_path.to_string_lossy(), &name, SymbolKind::Function,
                     child.start_position().row as u32,
                 );
 
                 symbols.push(SymbolNode {
                     id,
-                    name: name.to_string(),
+                    name: name.clone(),
                     kind: SymbolKind::Function,
                     file_path: file_path.to_path_buf(),
                     line_range: (node.start_position().row as u32, node.end_position().row as u32),
@@ -371,10 +402,86 @@ fn extract_js_variable_fn(
                     extract_js_calls(source, &body, id, None, raw_edges);
                 }
             }
+            "new_expression" => {
+                // const x = new ClassName(...)
+                let id = NodeId::new(
+                    &file_path.to_string_lossy(), &name, SymbolKind::Constant,
+                    child.start_position().row as u32,
+                );
+                let ctor = child_by_field(&value, "constructor")
+                    .map(|c| node_text(source, &c).to_string())
+                    .unwrap_or_default();
+                symbols.push(SymbolNode {
+                    id,
+                    name: name.clone(),
+                    kind: SymbolKind::Constant,
+                    file_path: file_path.to_path_buf(),
+                    line_range: (node.start_position().row as u32, node.end_position().row as u32),
+                    signature: Some(format!("const {name} = new {ctor}(...)")),
+                    doc_comment: None,
+                    visibility: Visibility::Public,
+                    language: lang,
+                    parent: Some(parent_id),
+                });
+                if !ctor.is_empty() {
+                    let ctor_target = ctor.split('<').next().unwrap_or(&ctor).trim().to_string();
+                    raw_edges.push(RawEdge {
+                        source: id,
+                        kind: EdgeKind::References,
+                        target_name: ctor_target,
+                        target_module: None,
+                        source_line: child.start_position().row as u32,
+                    });
+                }
+                // Body of the new-expression args may contain calls
+                extract_js_calls(source, &value, id, None, raw_edges);
+            }
+            "call_expression" => {
+                // const x = factory(...)  e.g. SocketClient('default')
+                let id = NodeId::new(
+                    &file_path.to_string_lossy(), &name, SymbolKind::Constant,
+                    child.start_position().row as u32,
+                );
+                let callee = child_by_field(&value, "function")
+                    .map(|c| node_text(source, &c).to_string())
+                    .unwrap_or_default();
+                symbols.push(SymbolNode {
+                    id,
+                    name: name.clone(),
+                    kind: SymbolKind::Constant,
+                    file_path: file_path.to_path_buf(),
+                    line_range: (node.start_position().row as u32, node.end_position().row as u32),
+                    signature: Some(format!("const {name} = {callee}(...)")),
+                    doc_comment: None,
+                    visibility: Visibility::Public,
+                    language: lang,
+                    parent: Some(parent_id),
+                });
+                extract_js_calls(source, &value, id, None, raw_edges);
+            }
+            _ => {
+                // const x = { ... } / identifier alias / literal / etc.
+                let id = NodeId::new(
+                    &file_path.to_string_lossy(), &name, SymbolKind::Constant,
+                    child.start_position().row as u32,
+                );
+                symbols.push(SymbolNode {
+                    id,
+                    name: name.clone(),
+                    kind: SymbolKind::Constant,
+                    file_path: file_path.to_path_buf(),
+                    line_range: (node.start_position().row as u32, node.end_position().row as u32),
+                    signature: Some(format!("const {name}")),
+                    doc_comment: None,
+                    visibility: Visibility::Public,
+                    language: lang,
+                    parent: Some(parent_id),
+                });
+                extract_js_calls(source, &value, id, None, raw_edges);
+            }
         }
     }
 }
-
 fn extract_js_type(
     source: &[u8],
     node: &tree_sitter::Node,
