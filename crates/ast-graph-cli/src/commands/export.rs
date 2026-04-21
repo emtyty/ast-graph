@@ -9,7 +9,7 @@ pub fn run(
     max_tokens: Option<usize>,
 ) -> Result<()> {
     let mut graph = ast_graph_parse::parse_project(Path::new("."))?;
-    ast_graph_resolve::resolve_edges(&mut graph);
+    ast_graph_resolve::resolve_edges(&mut graph, Path::new("."));
 
     let content = match format {
         "json" => export_json(&graph)?,

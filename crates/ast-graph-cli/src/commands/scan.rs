@@ -23,7 +23,7 @@ pub fn run(path: &str, storage: &dyn GraphStorage, clean: bool) -> Result<()> {
     ));
 
     pb.set_message("Resolving cross-file references...");
-    ast_graph_resolve::resolve_edges(&mut graph);
+    ast_graph_resolve::resolve_edges(&mut graph, path);
     pb.set_message(format!(
         "Resolved: {} nodes, {} edges",
         graph.metadata.total_nodes, graph.metadata.total_edges

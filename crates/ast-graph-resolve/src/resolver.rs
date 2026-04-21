@@ -4,7 +4,88 @@ use tracing::info;
 
 /// Resolve raw edges (string-based targets) into concrete edges (NodeId-based).
 /// This is the cross-file resolution phase that connects symbols across files.
-pub fn resolve_edges(graph: &mut CodeGraph) {
+fn load_path_aliases(root: &std::path::Path) -> Vec<(String, String)> {
+    let mut aliases = Vec::new();
+    for name in &["tsconfig.json", "jsconfig.json"] {
+        let p = root.join(name);
+        let Ok(text) = std::fs::read_to_string(&p) else { continue };
+        let bs = '\\';
+        let base_url = {
+            let key = "\"baseUrl\"";
+            if let Some(start) = text.find(key) {
+                let after = &text[start + key.len()..];
+                if let Some(colon) = after.find(':') {
+                    let after = after[colon+1..].trim_start();
+                    if after.starts_with('"') {
+                        let inner = &after[1..];
+                        if let Some(end) = inner.find('"') {
+                            root.join(&inner[..end]).to_string_lossy().replace(bs, "/")
+                        } else { root.to_string_lossy().replace(bs, "/") }
+                    } else { root.to_string_lossy().replace(bs, "/") }
+                } else { root.to_string_lossy().replace(bs, "/") }
+            } else { root.to_string_lossy().replace(bs, "/") }
+        };
+        if let Some(paths_start) = text.find("\"paths\"") {
+            let after = &text[paths_start..];
+            if let Some(brace) = after.find('{') {
+                let block = &after[brace..];
+                let mut depth = 0i32;
+                let depth_end = block.char_indices().find_map(|(i,c)| {
+                    match c { '{' => { depth += 1; None } '}' => { depth -= 1; if depth == 0 { Some(i+1) } else { None } } _ => None }
+                }).unwrap_or(block.len());
+                let block = &block[..depth_end];
+                let mut pos = 0usize;
+                while pos < block.len() {
+                    let Some(rel) = block[pos..].find('"') else { break };
+                    let ks = pos + rel + 1;
+                    let Some(ke) = block[ks..].find('"') else { break };
+                    let key = block[ks..ks+ke].to_string();
+                    pos = ks + ke + 1;
+                    let Some(ar) = block[pos..].find('[') else { break };
+                    let arr = pos + ar + 1;
+                    let Some(vq) = block[arr..].find('"') else { break };
+                    let vs = arr + vq + 1;
+                    let Some(ve) = block[vs..].find('"') else { break };
+                    let val = block[vs..vs+ve].to_string();
+                    pos = vs + ve + 1;
+                    let alias_prefix = key.trim_end_matches("/*").trim_end_matches('*').to_string();
+                    let target_suffix = val.trim_end_matches("/*").trim_end_matches('*').to_string();
+                    let joined = format!("{}/{}", base_url, target_suffix);
+                    let norm = normalize_path_static(&joined);
+                    aliases.push((alias_prefix, norm));
+                }
+            }
+        }
+        break;
+    }
+    aliases
+}
+
+fn normalize_path_static(path: &str) -> String {
+    let norm = path.replace('\\', "/");
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in norm.split('/') {
+        match seg { "" | "." => {} ".." => { parts.pop(); } s => parts.push(s), }
+    }
+    let result = parts.join("/");
+    if norm.starts_with('/') { format!("/{result}") } else { result }
+}
+
+fn resolve_alias_target(target: &str, aliases: &[(String, String)]) -> Option<String> {
+    for (prefix, abs_dir) in aliases {
+        if let Some(rest) = target.strip_prefix(prefix.as_str()) {
+            let rest = rest.trim_start_matches('/');
+            return Some(if rest.is_empty() { abs_dir.clone() } else { format!("{}/{}", abs_dir, rest) });
+        }
+    }
+    None
+}
+
+pub fn resolve_edges(graph: &mut CodeGraph, root: &std::path::Path) {
+    let path_aliases = load_path_aliases(root);
+    if !path_aliases.is_empty() {
+        info!("Loaded {} tsconfig path aliases", path_aliases.len());
+    }
     let name_index = build_name_index(graph);
     let file_index = build_file_index(graph);
 
@@ -85,10 +166,17 @@ pub fn resolve_edges(graph: &mut CodeGraph) {
             }
             EdgeKind::Imports => {
                 // target_module holds the computed absolute path for relative imports.
+                // For aliased imports, resolve via tsconfig paths first.
+                let alias_resolved = if raw.target_module.is_none() {
+                    resolve_alias_target(&raw.target_name, &path_aliases)
+                } else {
+                    None
+                };
                 let targets = raw
                     .target_module
                     .as_deref()
                     .and_then(|abs| resolve_import_by_path(abs, &file_index))
+                    .or_else(|| alias_resolved.as_deref().and_then(|abs| resolve_import_by_path(abs, &file_index)))
                     .or_else(|| resolve_import_by_name(&raw.target_name, &name_index));
                 if let Some(targets) = targets {
                     for target in targets {
