@@ -30,8 +30,12 @@ tree-sitter = "0.25"
 # SQLite
 rusqlite = { version = "0.31", features = ["bundled"] }
 
-# FalkorDB (Redis-module graph database, OpenCypher)
-falkordb = { version = "0.2", features = ["tokio"] }
+# FalkorDB (Redis-module graph database, OpenCypher).
+# Pinned to upstream main at 5e2646c (feat(builder): expose TCP keepalive
+# / TcpSettings, #189) — newer than the 0.2.1 crates.io release and needed
+# for TLS + TCP-keepalive fixes. Swap back to a crates.io version once the
+# next release ships.
+falkordb = { git = "https://github.com/FalkorDB/falkordb-rs", rev = "5e2646c", features = ["tokio"] }
 tokio = { version = "1", features = ["rt", "macros"] }
 
 # CLI
