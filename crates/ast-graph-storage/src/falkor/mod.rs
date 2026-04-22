@@ -107,11 +107,11 @@ impl FalkorStorage {
 
     /// Run a Cypher query and return rows as `Vec<Vec<FalkorValue>>`.
     ///
-    /// Retries once on ConnectionDown: the FalkorDB client's async pool
-    /// auto-replaces the dropped socket but still surfaces the first error.
-    /// Parse/resolve takes several seconds of wall time while our connection
-    /// sits idle, which is long enough for the server/LB to close it, so
-    /// the first save-phase query can reliably hit a dead connection.
+    /// Retries up to 3 times on connection errors with exponential backoff
+    /// (250 ms → 500 ms → 1 000 ms). The FalkorDB async pool auto-replaces a
+    /// dropped socket, but needs a moment; long parse/resolve pauses give the
+    /// server/LB enough idle time to close the socket, so the first save-phase
+    /// query reliably hits a dead handle.
     fn run_cypher(
         &self,
         cypher: &str,
@@ -122,7 +122,8 @@ impl FalkorStorage {
         let cypher = cypher.to_string();
         let params = params.clone();
         self.rt.block_on(async {
-            for attempt in 0..2 {
+            const MAX_RETRIES: u32 = 3;
+            for attempt in 0..=MAX_RETRIES {
                 let mut graph = self.client.select_graph(&graph_name);
                 let qb = graph.query(cypher.clone());
                 let res = if params.is_empty() {
@@ -138,8 +139,15 @@ impl FalkorStorage {
                         }
                         return Ok(rows);
                     }
-                    Err(e) if attempt == 0 && is_connection_error(&e) => {
-                        tracing::warn!("FalkorDB connection dropped, retrying once: {e}");
+                    Err(e) if attempt < MAX_RETRIES && is_connection_error(&e) => {
+                        let delay_ms = 250u64 * (1 << attempt); // 250, 500, 1000
+                        tracing::warn!(
+                            "FalkorDB connection dropped (attempt {}/{}), retrying in {}ms: {e}",
+                            attempt + 1,
+                            MAX_RETRIES,
+                            delay_ms,
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                         continue;
                     }
                     Err(e) => return Err(anyhow!(e)),
