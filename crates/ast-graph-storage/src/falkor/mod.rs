@@ -640,13 +640,20 @@ impl GraphStorage for FalkorStorage {
             .map(fv_get_i64)
             .unwrap_or(0);
 
-        let edge_rows =
-            self.run_cypher("MATCH (:Symbol)-[r]->(:Symbol) RETURN count(r)", &HashMap::new())?;
-        let edges = edge_rows
-            .first()
-            .and_then(|r| r.first())
-            .map(fv_get_i64)
-            .unwrap_or(0);
+        // Count edges per relationship type and sum, rather than scanning all
+        // relationships in one shot. A single MATCH over all rel-types on a
+        // large graph can exceed the client's socket read window (~600 ms);
+        // individual type scans are each fast enough to stay within it.
+        let mut edges = 0i64;
+        for kind in EdgeKind::ALL {
+            let q = format!(
+                "MATCH (:Symbol)-[r:{}]->(:Symbol) RETURN count(r)",
+                kind.as_neo4j_type()
+            );
+            if let Ok(rows) = self.run_cypher(&q, &HashMap::new()) {
+                edges += rows.first().and_then(|r| r.first()).map(fv_get_i64).unwrap_or(0);
+            }
+        }
 
         let file_rows = self.run_cypher(
             "MATCH (n:Symbol) RETURN count(DISTINCT n.file_path)",
