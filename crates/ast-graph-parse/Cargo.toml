@@ -15,6 +15,7 @@ tree-sitter-python = "0.23"
 tree-sitter-typescript = "0.23"
 tree-sitter-c-sharp = "0.23"
 tree-sitter-java = "0.23"
+tree-sitter-go = "0.25"
 walkdir = { workspace = true }
 ignore = { workspace = true }
 rayon = { workspace = true }

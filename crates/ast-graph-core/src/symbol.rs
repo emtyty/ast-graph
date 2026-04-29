@@ -149,6 +149,7 @@ pub enum Language {
     TypeScript,
     CSharp,
     Java,
+    Go,
 }
 
 impl Language {
@@ -160,6 +161,7 @@ impl Language {
             "ts" | "tsx" => Some(Self::TypeScript),
             "cs" => Some(Self::CSharp),
             "java" => Some(Self::Java),
+            "go" => Some(Self::Go),
             _ => None,
         }
     }
@@ -172,6 +174,7 @@ impl Language {
             Self::TypeScript => "typescript",
             Self::CSharp => "csharp",
             Self::Java => "java",
+            Self::Go => "go",
         }
     }
 
@@ -183,6 +186,7 @@ impl Language {
             "typescript" => Some(Self::TypeScript),
             "csharp" => Some(Self::CSharp),
             "java" => Some(Self::Java),
+            "go" => Some(Self::Go),
             _ => None,
         }
     }
