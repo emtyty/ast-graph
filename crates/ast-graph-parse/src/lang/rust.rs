@@ -143,7 +143,7 @@ fn walk_node(
                             child.end_position().row as u32,
                         ),
                         signature: Some(get_line_text(source, child.start_position().row)),
-                        doc_comment: None,
+                        doc_comment: extract_preceding_doc_comment(source, &child),
                         visibility: extract_visibility(&child, source),
                         language: Language::Rust,
                         parent: Some(parent_id),
@@ -169,7 +169,7 @@ fn walk_node(
                             child.end_position().row as u32,
                         ),
                         signature: Some(get_line_text(source, child.start_position().row)),
-                        doc_comment: None,
+                        doc_comment: extract_preceding_doc_comment(source, &child),
                         visibility: extract_visibility(&child, source),
                         language: Language::Rust,
                         parent: Some(parent_id),
@@ -206,7 +206,7 @@ fn extract_function(
             node.end_position().row as u32,
         ),
         signature: Some(signature),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_visibility(node, source),
         language: Language::Rust,
         parent: Some(parent_id),
@@ -237,7 +237,7 @@ fn extract_struct(
             node.end_position().row as u32,
         ),
         signature: Some(format!("struct {name}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_visibility(node, source),
         language: Language::Rust,
         parent: Some(parent_id),
@@ -268,7 +268,7 @@ fn extract_enum(
             node.end_position().row as u32,
         ),
         signature: Some(format!("enum {name}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_visibility(node, source),
         language: Language::Rust,
         parent: Some(parent_id),
@@ -299,7 +299,7 @@ fn extract_trait(
             node.end_position().row as u32,
         ),
         signature: Some(format!("trait {name}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_visibility(node, source),
         language: Language::Rust,
         parent: Some(parent_id),
@@ -330,7 +330,7 @@ fn extract_module(
             node.end_position().row as u32,
         ),
         signature: Some(format!("mod {name}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_visibility(node, source),
         language: Language::Rust,
         parent: Some(parent_id),
@@ -396,7 +396,7 @@ fn extract_impl(
                             child.end_position().row as u32,
                         ),
                         signature: Some(signature),
-                        doc_comment: None,
+                        doc_comment: extract_preceding_doc_comment(source, &child),
                         visibility: extract_visibility(&child, source),
                         language: Language::Rust,
                         parent: Some(parent_id),
@@ -578,4 +578,102 @@ fn get_line_text(source: &[u8], line: usize) -> String {
         .unwrap_or("")
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extractor::LanguageExtractor;
+
+    fn extract(src: &str) -> (Vec<SymbolNode>, Vec<RawEdge>) {
+        let extractor = RustExtractor;
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&extractor.tree_sitter_language()).unwrap();
+        let tree = parser.parse(src.as_bytes(), None).unwrap();
+        let r = extractor.extract(src.as_bytes(), &tree, Path::new("test.rs"));
+        (r.symbols, r.raw_edges)
+    }
+
+    fn find<'a>(syms: &'a [SymbolNode], name: &str) -> Option<&'a SymbolNode> {
+        syms.iter().find(|s| s.name == name)
+    }
+
+    #[test]
+    fn extracts_function() {
+        let (syms, _) = extract("pub fn add(a: i32, b: i32) -> i32 { a + b }\n");
+        let f = find(&syms, "add").expect("add missing");
+        assert_eq!(f.kind, SymbolKind::Function);
+        assert_eq!(f.visibility, Visibility::Public);
+        assert_eq!(f.language, Language::Rust);
+    }
+
+    #[test]
+    fn private_function_visibility() {
+        let (syms, _) = extract("fn helper() {}\n");
+        let f = find(&syms, "helper").expect("helper missing");
+        assert_eq!(f.visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn extracts_struct_and_impl_method() {
+        let src = "pub struct Point { x: f64, y: f64 }\nimpl Point { pub fn new() -> Self { Point { x: 0.0, y: 0.0 } } }\n";
+        let (syms, _) = extract(src);
+        assert!(find(&syms, "Point").map(|s| s.kind) == Some(SymbolKind::Struct));
+        let m = find(&syms, "Point::new").expect("Point::new missing");
+        assert_eq!(m.kind, SymbolKind::Method);
+    }
+
+    #[test]
+    fn extracts_trait_with_implements_edge() {
+        let src = "trait Greet { fn hello(&self); }\nstruct Dog;\nimpl Greet for Dog { fn hello(&self) {} }\n";
+        let (syms, edges) = extract(src);
+        assert!(find(&syms, "Greet").map(|s| s.kind) == Some(SymbolKind::Trait));
+        let impl_edges: Vec<_> = edges.iter().filter(|e| e.kind == EdgeKind::Implements).collect();
+        assert!(!impl_edges.is_empty(), "expected an IMPLEMENTS edge for Dog: Greet");
+    }
+
+    #[test]
+    fn extracts_enum() {
+        let (syms, _) = extract("pub enum Color { Red, Green, Blue }\n");
+        assert_eq!(find(&syms, "Color").map(|s| s.kind), Some(SymbolKind::Enum));
+    }
+
+    #[test]
+    fn emits_calls_edge() {
+        let src = "fn helper() {}\nfn run() { helper(); }\n";
+        let (syms, edges) = extract(src);
+        let run = find(&syms, "run").expect("run missing");
+        let calls: Vec<&str> = edges
+            .iter()
+            .filter(|e| e.source == run.id && e.kind == EdgeKind::Calls)
+            .map(|e| e.target_name.as_str())
+            .collect();
+        assert!(calls.iter().any(|t| t.contains("helper")), "expected CALLS to helper, got: {:?}", calls);
+    }
+
+    #[test]
+    fn extracts_doc_comment_on_function() {
+        let src = "/// Adds two numbers together.\n/// Returns the sum.\nfn add(a: i32, b: i32) -> i32 { a + b }\n";
+        let (syms, _) = extract(src);
+        let f = find(&syms, "add").expect("add missing");
+        let doc = f.doc_comment.as_deref().unwrap_or("");
+        assert!(doc.contains("Adds two numbers"), "doc was: {doc:?}");
+        assert!(doc.contains("Returns the sum"), "doc was: {doc:?}");
+    }
+
+    #[test]
+    fn extracts_doc_comment_on_struct() {
+        let src = "/// A point in 2D space.\npub struct Point { x: f64, y: f64 }\n";
+        let (syms, _) = extract(src);
+        let s = find(&syms, "Point").expect("Point missing");
+        assert_eq!(s.doc_comment.as_deref(), Some("A point in 2D space."));
+    }
+
+    #[test]
+    fn no_doc_comment_when_blank_line_separates() {
+        let src = "/// Stale comment.\n\nfn add() {}\n";
+        let (syms, _) = extract(src);
+        let f = find(&syms, "add").expect("add missing");
+        assert!(f.doc_comment.is_none(), "blank line should break the doc-comment chain, got: {:?}", f.doc_comment);
+    }
 }

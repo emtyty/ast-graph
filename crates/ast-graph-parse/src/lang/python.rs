@@ -127,6 +127,9 @@ fn extract_py_function(
         Visibility::Public
     };
 
+    let body = child_by_field(node, "body");
+    let doc_comment = body.as_ref().and_then(|b| extract_python_docstring(source, b));
+
     symbols.push(SymbolNode {
         id,
         name: qualified_name,
@@ -134,14 +137,14 @@ fn extract_py_function(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("def {name}{params}{return_type}")),
-        doc_comment: None,
+        doc_comment,
         visibility,
         language: Language::Python,
         parent: Some(parent_id),
     });
 
     // Extract calls within the function body
-    if let Some(body) = child_by_field(node, "body") {
+    if let Some(body) = body {
         extract_py_calls(source, &body, id, class_name, raw_edges);
     }
 }
@@ -167,6 +170,9 @@ fn extract_py_class(
         node.start_position().row as u32,
     );
 
+    let body = child_by_field(node, "body");
+    let doc_comment = body.as_ref().and_then(|b| extract_python_docstring(source, b));
+
     symbols.push(SymbolNode {
         id,
         name: name.to_string(),
@@ -174,7 +180,7 @@ fn extract_py_class(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("class {name}")),
-        doc_comment: None,
+        doc_comment,
         visibility: Visibility::Public,
         language: Language::Python,
         parent: Some(parent_id),
@@ -198,7 +204,7 @@ fn extract_py_class(
     }
 
     // Recurse into class body for methods — pass class name for qualified method names
-    if let Some(body) = child_by_field(node, "body") {
+    if let Some(body) = body {
         walk_python(source, &body, file_path, id, Some(name), symbols, raw_edges);
     }
 }
@@ -310,5 +316,107 @@ fn extract_py_calls(
             }
         }
         extract_py_calls(source, &child, parent_id, class_name, raw_edges);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extractor::LanguageExtractor;
+
+    fn extract(src: &str) -> (Vec<SymbolNode>, Vec<RawEdge>) {
+        let extractor = PythonExtractor;
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&extractor.tree_sitter_language()).unwrap();
+        let tree = parser.parse(src.as_bytes(), None).unwrap();
+        let r = extractor.extract(src.as_bytes(), &tree, Path::new("test.py"));
+        (r.symbols, r.raw_edges)
+    }
+
+    fn find<'a>(syms: &'a [SymbolNode], name: &str) -> Option<&'a SymbolNode> {
+        syms.iter().find(|s| s.name == name)
+    }
+
+    #[test]
+    fn extracts_function() {
+        let (syms, _) = extract("def add(a, b):\n    return a + b\n");
+        let f = find(&syms, "add").expect("add missing");
+        assert_eq!(f.kind, SymbolKind::Function);
+        assert_eq!(f.visibility, Visibility::Public);
+        assert_eq!(f.language, Language::Python);
+    }
+
+    #[test]
+    fn private_function_starts_with_underscore() {
+        let (syms, _) = extract("def _helper():\n    pass\n");
+        let f = find(&syms, "_helper").expect("_helper missing");
+        assert_eq!(f.visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn dunder_method_is_public() {
+        let src = "class Foo:\n    def __init__(self):\n        pass\n";
+        let (syms, _) = extract(src);
+        let m = find(&syms, "Foo.__init__").expect("Foo.__init__ missing");
+        assert_eq!(m.kind, SymbolKind::Constructor);
+        assert_eq!(m.visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn extracts_class_and_method() {
+        let src = "class Foo:\n    def bar(self):\n        return 42\n";
+        let (syms, _) = extract(src);
+        assert_eq!(find(&syms, "Foo").map(|s| s.kind), Some(SymbolKind::Class));
+        let m = find(&syms, "Foo.bar").expect("Foo.bar missing");
+        assert_eq!(m.kind, SymbolKind::Method);
+    }
+
+    #[test]
+    fn extracts_extends_edge() {
+        let src = "class Animal:\n    pass\nclass Dog(Animal):\n    pass\n";
+        let (_, edges) = extract(src);
+        let extends: Vec<_> = edges.iter().filter(|e| e.kind == EdgeKind::Extends).collect();
+        assert!(!extends.is_empty(), "expected EXTENDS edge for Dog -> Animal");
+    }
+
+    #[test]
+    fn emits_calls_edge() {
+        let src = "def helper():\n    pass\ndef run():\n    helper()\n";
+        let (syms, edges) = extract(src);
+        let run = find(&syms, "run").expect("run missing");
+        let calls: Vec<&str> = edges.iter()
+            .filter(|e| e.source == run.id && e.kind == EdgeKind::Calls)
+            .map(|e| e.target_name.as_str())
+            .collect();
+        assert!(calls.iter().any(|t| *t == "helper"));
+    }
+
+    #[test]
+    fn qualifies_self_call() {
+        let src = "class Foo:\n    def bar(self):\n        self.baz()\n    def baz(self):\n        pass\n";
+        let (syms, edges) = extract(src);
+        let bar = find(&syms, "Foo.bar").expect("Foo.bar missing");
+        let calls: Vec<&str> = edges.iter()
+            .filter(|e| e.source == bar.id && e.kind == EdgeKind::Calls)
+            .map(|e| e.target_name.as_str())
+            .collect();
+        assert!(calls.iter().any(|t| *t == "Foo.baz"), "self.baz should resolve to Foo.baz, got: {:?}", calls);
+    }
+
+    #[test]
+    fn extracts_docstring() {
+        let src = "def add(a, b):\n    \"\"\"Add two numbers and return the sum.\"\"\"\n    return a + b\n";
+        let (syms, _) = extract(src);
+        let f = find(&syms, "add").expect("add missing");
+        let doc = f.doc_comment.as_deref().unwrap_or("");
+        assert!(doc.contains("Add two numbers"), "doc was: {doc:?}");
+    }
+
+    #[test]
+    fn extracts_class_docstring() {
+        let src = "class Foo:\n    \"\"\"A foo widget.\"\"\"\n    pass\n";
+        let (syms, _) = extract(src);
+        let c = find(&syms, "Foo").expect("Foo missing");
+        assert_eq!(c.doc_comment.as_deref(), Some("A foo widget."));
     }
 }

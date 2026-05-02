@@ -190,25 +190,37 @@ fn extract_go_import_spec(
     });
 }
 
-/// Extract receiver type name from a method_declaration node, stripping any pointer `*`.
-fn extract_receiver_type(source: &[u8], node: &tree_sitter::Node) -> Option<String> {
+/// Receiver info for a Go method: both the variable name (`r`, `repo`, etc.)
+/// and the type name (with `*` and generics stripped).  `var_name` is `None`
+/// when the receiver omits a name like `func (*Dog) Bark()`.
+struct ReceiverInfo {
+    var_name: Option<String>,
+    type_name: String,
+}
+
+/// Extract receiver var name + type name from a method_declaration node.
+fn extract_receiver_info(source: &[u8], node: &tree_sitter::Node) -> Option<ReceiverInfo> {
     let receiver = child_by_field(node, "receiver")?;
-    // receiver is a parameter_list; find the single parameter_declaration inside it.
     let mut cursor = receiver.walk();
     for child in receiver.children(&mut cursor) {
         if child.kind() == "parameter_declaration" {
             let type_node = child_by_field(&child, "type")?;
             let type_text = node_text(source, &type_node);
-            // Strip pointer marker and any parentheses from generic receivers.
-            let clean = type_text
+            let type_name = type_text
                 .trim_start_matches('*')
                 .trim_start_matches('(')
                 .trim_end_matches(')')
                 .split('[') // strip type parameters: T[K] → T
                 .next()
                 .unwrap_or(type_text)
-                .trim();
-            return Some(clean.to_string());
+                .trim()
+                .to_string();
+
+            let var_name = child_by_field(&child, "name")
+                .map(|n| node_text(source, &n).to_string())
+                .filter(|s| !s.is_empty() && s != "_");
+
+            return Some(ReceiverInfo { var_name, type_name });
         }
     }
     None
@@ -222,8 +234,8 @@ fn extract_go_method(
     symbols: &mut Vec<SymbolNode>,
     raw_edges: &mut Vec<RawEdge>,
 ) {
-    let receiver_type = extract_receiver_type(source, node);
-    extract_go_function(source, node, file_path, parent_id, receiver_type.as_deref(), symbols, raw_edges);
+    let receiver = extract_receiver_info(source, node);
+    extract_go_function(source, node, file_path, parent_id, receiver.as_ref(), symbols, raw_edges);
 }
 
 fn extract_go_function(
@@ -231,7 +243,7 @@ fn extract_go_function(
     node: &tree_sitter::Node,
     file_path: &Path,
     parent_id: NodeId,
-    receiver_type: Option<&str>,
+    receiver: Option<&ReceiverInfo>,
     symbols: &mut Vec<SymbolNode>,
     raw_edges: &mut Vec<RawEdge>,
 ) {
@@ -249,8 +261,8 @@ fn extract_go_function(
         .map(|r| format!(" {}", node_text(source, &r)))
         .unwrap_or_default();
 
-    let (kind, qualified_name) = match receiver_type {
-        Some(recv) => (SymbolKind::Method, format!("{recv}.{name}")),
+    let (kind, qualified_name) = match receiver {
+        Some(r) => (SymbolKind::Method, format!("{}.{}", r.type_name, name)),
         None => (SymbolKind::Function, name.to_string()),
     };
 
@@ -263,8 +275,8 @@ fn extract_go_function(
         node.start_position().row as u32,
     );
 
-    let receiver_sig = match receiver_type {
-        Some(recv) => format!("({recv}) "),
+    let receiver_sig = match receiver {
+        Some(r) => format!("({}) ", r.type_name),
         None => String::new(),
     };
 
@@ -275,14 +287,14 @@ fn extract_go_function(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("func {receiver_sig}{name}{params}{result}")),
-        doc_comment: None,
+        doc_comment: extract_doc_comment_anchor(source, node),
         visibility,
         language: Language::Go,
         parent: Some(parent_id),
     });
 
     if let Some(body) = child_by_field(node, "body") {
-        extract_go_calls(source, &body, id, receiver_type, raw_edges);
+        extract_go_calls(source, &body, id, receiver, raw_edges);
     }
 }
 
@@ -350,7 +362,7 @@ fn extract_go_type_spec(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(sig),
-        doc_comment: None,
+        doc_comment: extract_doc_comment_anchor(source, node),
         visibility: go_visibility(name),
         language: Language::Go,
         parent: Some(parent_id),
@@ -394,7 +406,7 @@ fn extract_go_type_alias(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("type {name} = {type_text}")),
-        doc_comment: None,
+        doc_comment: extract_doc_comment_anchor(source, node),
         visibility: go_visibility(name),
         language: Language::Go,
         parent: Some(parent_id),
@@ -522,7 +534,7 @@ fn extract_go_interface_methods(
             file_path: file_path.to_path_buf(),
             line_range: (child.start_position().row as u32, child.end_position().row as u32),
             signature: Some(format!("{name}{params}{result}")),
-            doc_comment: None,
+            doc_comment: extract_preceding_doc_comment(source, &child),
             visibility: go_visibility(name),
             language: Language::Go,
             parent: Some(parent_id),
@@ -576,7 +588,7 @@ fn extract_go_const(
             file_path: file_path.to_path_buf(),
             line_range: (child.start_position().row as u32, child.end_position().row as u32),
             signature: Some(format!("const {name}{value_text}")),
-            doc_comment: None,
+            doc_comment: extract_doc_comment_anchor(source, &child),
             visibility: go_visibility(name),
             language: Language::Go,
             parent: Some(parent_id),
@@ -588,7 +600,7 @@ fn extract_go_calls(
     source: &[u8],
     node: &tree_sitter::Node,
     caller_id: NodeId,
-    receiver_type: Option<&str>,
+    receiver: Option<&ReceiverInfo>,
     raw_edges: &mut Vec<RawEdge>,
 ) {
     let mut cursor = node.walk();
@@ -596,13 +608,8 @@ fn extract_go_calls(
         if child.kind() == "call_expression" {
             if let Some(func) = child_by_field(&child, "function") {
                 let raw_target = node_text(source, &func);
-                // Go has no unambiguous `self`/`this` keyword, so we cannot safely
-                // strip receiver prefixes without type information.  Emit the raw
-                // selector text (e.g. "fmt.Sprintf", "g.Save") and let the resolver
-                // do best-effort matching.  For bare identifiers ("StandaloneHelper")
-                // resolution works directly.
-                let call_target = match receiver_type {
-                    Some(recv_type) => qualify_go_self_call(raw_target, recv_type),
+                let call_target = match receiver {
+                    Some(r) => qualify_go_self_call(raw_target, r),
                     None => raw_target.to_string(),
                 };
                 raw_edges.push(RawEdge {
@@ -614,16 +621,21 @@ fn extract_go_calls(
                 });
             }
         }
-        extract_go_calls(source, &child, caller_id, receiver_type, raw_edges);
+        extract_go_calls(source, &child, caller_id, receiver, raw_edges);
     }
 }
 
-/// Qualify calls that use the receiver variable as the operand.
-/// We only rewrite when the operand is a short single-letter or two-letter
-/// lowercase identifier that matches common Go receiver conventions AND the
-/// method part has no further dots (no chaining).  Everything else is emitted
-/// as-is so package calls like `fmt.Sprintf` are preserved.
-fn qualify_go_self_call(target: &str, recv_type: &str) -> String {
+/// Rewrite `recvVar.Method` to `ReceiverType.Method` using the actual
+/// receiver variable name captured at method extraction time.  Anything
+/// that doesn't match the receiver variable (package calls like
+/// `fmt.Println`, calls on other locals, chained selectors) is preserved
+/// as-is.
+fn qualify_go_self_call(target: &str, recv: &ReceiverInfo) -> String {
+    let var = match recv.var_name.as_deref() {
+        Some(v) => v,
+        None => return target.to_string(),
+    };
+
     let dot = match target.find('.') {
         Some(p) => p,
         None => return target.to_string(),
@@ -632,19 +644,13 @@ fn qualify_go_self_call(target: &str, recv_type: &str) -> String {
     let operand = &target[..dot];
     let method = &target[dot + 1..];
 
-    // Multi-level chains (a.b.c) — leave unchanged.
+    // Chained selectors (a.b.c) — bail out, can't safely rewrite.
     if method.contains('.') {
         return target.to_string();
     }
 
-    // Only rewrite very short lowercase identifiers (1-2 chars) which are the
-    // idiomatic Go receiver variable convention.  Longer identifiers are more
-    // likely to be package names or non-receiver variables.
-    let is_likely_receiver = operand.len() <= 2
-        && operand.chars().all(|c| c.is_lowercase());
-
-    if is_likely_receiver {
-        format!("{recv_type}.{method}")
+    if operand == var {
+        format!("{}.{}", recv.type_name, method)
     } else {
         target.to_string()
     }
@@ -705,33 +711,72 @@ mod tests {
 
     // ── qualify_go_self_call ─────────────────────────────────────────────────
 
+    fn recv(var: &str, type_name: &str) -> ReceiverInfo {
+        ReceiverInfo { var_name: Some(var.to_string()), type_name: type_name.to_string() }
+    }
+
+    fn anon_recv(type_name: &str) -> ReceiverInfo {
+        ReceiverInfo { var_name: None, type_name: type_name.to_string() }
+    }
+
     #[test]
     fn qualify_short_receiver_var() {
-        // "s" is a 1-char lowercase var → rewrite to Type.Method
-        assert_eq!(qualify_go_self_call("s.Save", "Store"), "Store.Save");
-        assert_eq!(qualify_go_self_call("g.Greet", "Greeter"), "Greeter.Greet");
+        assert_eq!(qualify_go_self_call("s.Save", &recv("s", "Store")), "Store.Save");
+        assert_eq!(qualify_go_self_call("g.Greet", &recv("g", "Greeter")), "Greeter.Greet");
     }
 
     #[test]
-    fn qualify_two_char_receiver_var() {
-        assert_eq!(qualify_go_self_call("uc.Do", "UseCase"), "UseCase.Do");
+    fn qualify_long_receiver_var() {
+        // The previous heuristic only matched ≤2 char vars; the new exact-name
+        // match handles any length.
+        assert_eq!(
+            qualify_go_self_call("repo.Find", &recv("repo", "UserRepo")),
+            "UserRepo.Find"
+        );
+        assert_eq!(
+            qualify_go_self_call("client.Send", &recv("client", "HTTPClient")),
+            "HTTPClient.Send"
+        );
     }
 
     #[test]
-    fn no_qualify_package_call() {
-        // "fmt" is 3 chars → treated as a package, left as-is
-        assert_eq!(qualify_go_self_call("fmt.Sprintf", "Any"), "fmt.Sprintf");
-        assert_eq!(qualify_go_self_call("strings.ToUpper", "Any"), "strings.ToUpper");
+    fn no_qualify_when_operand_is_not_receiver_var() {
+        // operand "fmt" doesn't match receiver var "g" → left as-is
+        assert_eq!(
+            qualify_go_self_call("fmt.Sprintf", &recv("g", "Greeter")),
+            "fmt.Sprintf"
+        );
+        assert_eq!(
+            qualify_go_self_call("strings.ToUpper", &recv("g", "Greeter")),
+            "strings.ToUpper"
+        );
+        // Unrelated local variable
+        assert_eq!(
+            qualify_go_self_call("other.Call", &recv("g", "Greeter")),
+            "other.Call"
+        );
     }
 
     #[test]
     fn no_qualify_bare_function() {
-        assert_eq!(qualify_go_self_call("helper", "Any"), "helper");
+        assert_eq!(qualify_go_self_call("helper", &recv("g", "Greeter")), "helper");
     }
 
     #[test]
     fn no_qualify_chained_call() {
-        assert_eq!(qualify_go_self_call("s.db.Query", "Store"), "s.db.Query");
+        assert_eq!(
+            qualify_go_self_call("s.db.Query", &recv("s", "Store")),
+            "s.db.Query"
+        );
+    }
+
+    #[test]
+    fn no_qualify_anonymous_receiver() {
+        // `func (*Dog) Bark()` — no receiver var, so no rewriting possible
+        assert_eq!(
+            qualify_go_self_call("d.Foo", &anon_recv("Dog")),
+            "d.Foo"
+        );
     }
 
     // ── package ──────────────────────────────────────────────────────────────
@@ -961,6 +1006,23 @@ mod tests {
 
         let commit = find_symbol(&symbols, "Store.Commit").expect("Store.Commit missing");
         let calls = find_edges_from(&edges, commit.id);
+        let targets = edge_targets(&calls);
+        assert!(
+            targets.contains(&"Store.Save"),
+            "expected CALLS Store.Save, got: {:?}",
+            targets
+        );
+    }
+
+    #[test]
+    fn emits_calls_edge_qualified_for_long_receiver_name() {
+        // Previous heuristic missed receivers longer than 2 chars; this is the
+        // regression test for the fix.
+        let src = "package p\ntype Store struct{}\nfunc (store *Store) Run() { store.Save() }\nfunc (store *Store) Save() {}\n";
+        let (symbols, edges) = extract(src);
+
+        let run = find_symbol(&symbols, "Store.Run").expect("Store.Run missing");
+        let calls = find_edges_from(&edges, run.id);
         let targets = edge_targets(&calls);
         assert!(
             targets.contains(&"Store.Save"),

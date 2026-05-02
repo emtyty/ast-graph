@@ -102,7 +102,7 @@ fn walk_js(
                         file_path: file_path.to_path_buf(),
                         line_range: (child.start_position().row as u32, child.end_position().row as u32),
                         signature: Some(format!("enum {name}")),
-                        doc_comment: None,
+                        doc_comment: extract_preceding_doc_comment(source, &child),
                         visibility: Visibility::Public,
                         language: lang,
                         parent: Some(parent_id),
@@ -151,7 +151,7 @@ fn extract_js_function(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("function {name}{params}{return_type}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: Visibility::Public,
         language: lang,
         parent: Some(parent_id),
@@ -190,7 +190,7 @@ fn extract_js_class(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("class {name}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: Visibility::Public,
         language: lang,
         parent: Some(parent_id),
@@ -261,7 +261,7 @@ fn extract_js_class(
                         file_path: file_path.to_path_buf(),
                         line_range: (child.start_position().row as u32, child.end_position().row as u32),
                         signature: Some(format!("{method_name}{params}")),
-                        doc_comment: None,
+                        doc_comment: extract_preceding_doc_comment(source, &child),
                         visibility: Visibility::Public,
                         language: lang,
                         parent: Some(id),
@@ -392,7 +392,7 @@ fn extract_js_variable(
                     file_path: file_path.to_path_buf(),
                     line_range: (node.start_position().row as u32, node.end_position().row as u32),
                     signature: Some(format!("const {name} = {params} =>")),
-                    doc_comment: None,
+                    doc_comment: extract_doc_comment_anchor(source, node),
                     visibility: Visibility::Public,
                     language: lang,
                     parent: Some(parent_id),
@@ -418,7 +418,7 @@ fn extract_js_variable(
                     file_path: file_path.to_path_buf(),
                     line_range: (node.start_position().row as u32, node.end_position().row as u32),
                     signature: Some(format!("const {name} = new {ctor}(...)")),
-                    doc_comment: None,
+                    doc_comment: extract_doc_comment_anchor(source, node),
                     visibility: Visibility::Public,
                     language: lang,
                     parent: Some(parent_id),
@@ -452,7 +452,7 @@ fn extract_js_variable(
                     file_path: file_path.to_path_buf(),
                     line_range: (node.start_position().row as u32, node.end_position().row as u32),
                     signature: Some(format!("const {name} = {callee}(...)")),
-                    doc_comment: None,
+                    doc_comment: extract_doc_comment_anchor(source, node),
                     visibility: Visibility::Public,
                     language: lang,
                     parent: Some(parent_id),
@@ -472,7 +472,7 @@ fn extract_js_variable(
                     file_path: file_path.to_path_buf(),
                     line_range: (node.start_position().row as u32, node.end_position().row as u32),
                     signature: Some(format!("const {name}")),
-                    doc_comment: None,
+                    doc_comment: extract_doc_comment_anchor(source, node),
                     visibility: Visibility::Public,
                     language: lang,
                     parent: Some(parent_id),
@@ -517,7 +517,7 @@ fn extract_js_type(
             "{} {name}",
             if kind == SymbolKind::Interface { "interface" } else { "type" }
         )),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: Visibility::Public,
         language: lang,
         parent: Some(parent_id),
@@ -550,5 +550,107 @@ fn extract_js_calls(
             }
         }
         extract_js_calls(source, &child, parent_id, class_name, raw_edges);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extractor::LanguageExtractor;
+
+    fn extract_js(src: &str) -> (Vec<SymbolNode>, Vec<RawEdge>) {
+        let extractor = JavaScriptExtractor::new(Language::JavaScript);
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&extractor.tree_sitter_language()).unwrap();
+        let tree = parser.parse(src.as_bytes(), None).unwrap();
+        let r = extractor.extract(src.as_bytes(), &tree, Path::new("test.js"));
+        (r.symbols, r.raw_edges)
+    }
+
+    fn extract_ts(src: &str) -> (Vec<SymbolNode>, Vec<RawEdge>) {
+        let extractor = JavaScriptExtractor::new(Language::TypeScript);
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&extractor.tree_sitter_language()).unwrap();
+        let tree = parser.parse(src.as_bytes(), None).unwrap();
+        let r = extractor.extract(src.as_bytes(), &tree, Path::new("test.ts"));
+        (r.symbols, r.raw_edges)
+    }
+
+    fn find<'a>(syms: &'a [SymbolNode], name: &str) -> Option<&'a SymbolNode> {
+        syms.iter().find(|s| s.name == name)
+    }
+
+    #[test]
+    fn extracts_function() {
+        let (syms, _) = extract_js("function add(a, b) { return a + b; }\n");
+        let f = find(&syms, "add").expect("add missing");
+        assert_eq!(f.kind, SymbolKind::Function);
+        assert_eq!(f.language, Language::JavaScript);
+    }
+
+    #[test]
+    fn extracts_class_with_method() {
+        let src = "class Foo { bar() { return 42; } }\n";
+        let (syms, _) = extract_js(src);
+        assert_eq!(find(&syms, "Foo").map(|s| s.kind), Some(SymbolKind::Class));
+        let m = find(&syms, "Foo.bar").expect("Foo.bar missing");
+        assert_eq!(m.kind, SymbolKind::Method);
+    }
+
+    #[test]
+    fn extracts_arrow_function_const() {
+        let src = "const greet = (name) => `hello ${name}`;\n";
+        let (syms, _) = extract_js(src);
+        let f = find(&syms, "greet").expect("greet missing");
+        assert_eq!(f.kind, SymbolKind::Function);
+    }
+
+    #[test]
+    fn extracts_typescript_interface() {
+        let src = "interface User { id: number; name: string; }\n";
+        let (syms, _) = extract_ts(src);
+        let i = find(&syms, "User").expect("User missing");
+        assert_eq!(i.kind, SymbolKind::Interface);
+        assert_eq!(i.language, Language::TypeScript);
+    }
+
+    #[test]
+    fn extracts_typescript_enum() {
+        let src = "enum Color { Red, Green, Blue }\n";
+        let (syms, _) = extract_ts(src);
+        assert_eq!(find(&syms, "Color").map(|s| s.kind), Some(SymbolKind::Enum));
+    }
+
+    #[test]
+    fn emits_calls_edge() {
+        let src = "function helper() {}\nfunction run() { helper(); }\n";
+        let (syms, edges) = extract_js(src);
+        let run = find(&syms, "run").expect("run missing");
+        let calls: Vec<&str> = edges.iter()
+            .filter(|e| e.source == run.id && e.kind == EdgeKind::Calls)
+            .map(|e| e.target_name.as_str())
+            .collect();
+        assert!(calls.iter().any(|t| *t == "helper"));
+    }
+
+    #[test]
+    fn qualifies_this_call() {
+        let src = "class Foo { bar() { this.baz(); } baz() {} }\n";
+        let (syms, edges) = extract_js(src);
+        let bar = find(&syms, "Foo.bar").expect("Foo.bar missing");
+        let calls: Vec<&str> = edges.iter()
+            .filter(|e| e.source == bar.id && e.kind == EdgeKind::Calls)
+            .map(|e| e.target_name.as_str())
+            .collect();
+        assert!(calls.iter().any(|t| *t == "Foo.baz"), "this.baz should resolve to Foo.baz, got: {:?}", calls);
+    }
+
+    #[test]
+    fn extracts_jsdoc_comment() {
+        let src = "/**\n * Adds two numbers.\n * @returns the sum\n */\nfunction add(a, b) { return a + b; }\n";
+        let (syms, _) = extract_js(src);
+        let f = find(&syms, "add").expect("add missing");
+        let doc = f.doc_comment.as_deref().unwrap_or("");
+        assert!(doc.contains("Adds two numbers"), "doc was: {doc:?}");
     }
 }

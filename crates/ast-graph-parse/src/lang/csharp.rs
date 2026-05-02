@@ -79,7 +79,7 @@ fn walk_csharp(
                         file_path: file_path.to_path_buf(),
                         line_range: (child.start_position().row as u32, child.end_position().row as u32),
                         signature: Some(format!("enum {name}")),
-                        doc_comment: None,
+                        doc_comment: extract_preceding_doc_comment(source, &child),
                         visibility: extract_cs_visibility(&child, source),
                         language: Language::CSharp,
                         parent: Some(parent_id),
@@ -134,7 +134,7 @@ fn extract_cs_namespace(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("namespace {name}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: Visibility::Public,
         language: Language::CSharp,
         parent: Some(parent_id),
@@ -174,7 +174,7 @@ fn extract_cs_class(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("class {name}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_cs_visibility(node, source),
         language: Language::CSharp,
         parent: Some(parent_id),
@@ -235,7 +235,7 @@ fn extract_cs_struct(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("struct {name}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_cs_visibility(node, source),
         language: Language::CSharp,
         parent: Some(parent_id),
@@ -272,7 +272,7 @@ fn extract_cs_interface(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("interface {name}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_cs_visibility(node, source),
         language: Language::CSharp,
         parent: Some(parent_id),
@@ -309,7 +309,7 @@ fn extract_cs_record(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("record {name}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_cs_visibility(node, source),
         language: Language::CSharp,
         parent: Some(parent_id),
@@ -361,7 +361,7 @@ fn extract_cs_method(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("{return_type} {name}{params}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_cs_visibility(node, source),
         language: Language::CSharp,
         parent: Some(parent_id),
@@ -410,7 +410,7 @@ fn extract_cs_constructor(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("{name}{params}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_cs_visibility(node, source),
         language: Language::CSharp,
         parent: Some(parent_id),
@@ -450,7 +450,7 @@ fn extract_cs_property(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("{prop_type} {name}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_cs_visibility(node, source),
         language: Language::CSharp,
         parent: Some(parent_id),
@@ -554,4 +554,72 @@ fn extract_cs_visibility(node: &tree_sitter::Node, source: &[u8]) -> Visibility 
         }
     }
     Visibility::Private // C# default
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extractor::LanguageExtractor;
+
+    fn extract(src: &str) -> (Vec<SymbolNode>, Vec<RawEdge>) {
+        let extractor = CSharpExtractor;
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&extractor.tree_sitter_language()).unwrap();
+        let tree = parser.parse(src.as_bytes(), None).unwrap();
+        let r = extractor.extract(src.as_bytes(), &tree, Path::new("test.cs"));
+        (r.symbols, r.raw_edges)
+    }
+
+    fn find<'a>(syms: &'a [SymbolNode], name: &str) -> Option<&'a SymbolNode> {
+        syms.iter().find(|s| s.name == name)
+    }
+
+    #[test]
+    fn extracts_class_and_method() {
+        let src = "namespace App { public class Foo { public int Bar() { return 42; } } }\n";
+        let (syms, _) = extract(src);
+        assert!(find(&syms, "Foo").is_some());
+        let m = find(&syms, "Foo.Bar").expect("Foo.Bar missing");
+        assert_eq!(m.kind, SymbolKind::Method);
+        assert_eq!(m.visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn extracts_interface() {
+        let src = "namespace App { public interface IFoo { void Bar(); } }\n";
+        let (syms, _) = extract(src);
+        assert_eq!(find(&syms, "IFoo").map(|s| s.kind), Some(SymbolKind::Interface));
+    }
+
+    #[test]
+    fn extracts_struct_and_record() {
+        let src = "namespace App { public struct Point { } public record User(string Name); }\n";
+        let (syms, _) = extract(src);
+        assert_eq!(find(&syms, "Point").map(|s| s.kind), Some(SymbolKind::Struct));
+        assert_eq!(find(&syms, "User").map(|s| s.kind), Some(SymbolKind::Record));
+    }
+
+    #[test]
+    fn extracts_enum() {
+        let src = "namespace App { public enum Color { Red, Green, Blue } }\n";
+        let (syms, _) = extract(src);
+        assert_eq!(find(&syms, "Color").map(|s| s.kind), Some(SymbolKind::Enum));
+    }
+
+    #[test]
+    fn extracts_namespace() {
+        let src = "namespace MyApp.Services { public class Foo { } }\n";
+        let (syms, _) = extract(src);
+        let ns = syms.iter().find(|s| s.kind == SymbolKind::Namespace);
+        assert!(ns.is_some(), "expected a Namespace symbol");
+    }
+
+    #[test]
+    fn extracts_xml_doc_comment() {
+        let src = "namespace App {\n    /// <summary>Adds two numbers.</summary>\n    public class Foo {\n        public int Bar() { return 42; }\n    }\n}\n";
+        let (syms, _) = extract(src);
+        let f = find(&syms, "Foo").expect("Foo missing");
+        let doc = f.doc_comment.as_deref().unwrap_or("");
+        assert!(doc.contains("Adds two numbers") || doc.contains("<summary>"), "doc was: {doc:?}");
+    }
 }

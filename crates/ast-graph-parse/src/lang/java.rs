@@ -192,7 +192,7 @@ fn extract_java_class(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("class {name}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_java_visibility(node, source),
         language: Language::Java,
         parent: Some(parent_id),
@@ -255,7 +255,7 @@ fn extract_java_interface(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("interface {name}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_java_visibility(node, source),
         language: Language::Java,
         parent: Some(parent_id),
@@ -305,7 +305,7 @@ fn extract_java_enum(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("enum {name}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_java_visibility(node, source),
         language: Language::Java,
         parent: Some(parent_id),
@@ -379,7 +379,7 @@ fn extract_java_record(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("record {name}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_java_visibility(node, source),
         language: Language::Java,
         parent: Some(parent_id),
@@ -428,7 +428,7 @@ fn extract_java_annotation_type(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("@interface {name}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_java_visibility(node, source),
         language: Language::Java,
         parent: Some(parent_id),
@@ -479,7 +479,7 @@ fn extract_java_method(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("{return_type} {name}{params}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_java_visibility(node, source),
         language: Language::Java,
         parent: Some(parent_id),
@@ -526,7 +526,7 @@ fn extract_java_constructor(
         file_path: file_path.to_path_buf(),
         line_range: (node.start_position().row as u32, node.end_position().row as u32),
         signature: Some(format!("{name}{params}")),
-        doc_comment: None,
+        doc_comment: extract_preceding_doc_comment(source, node),
         visibility: extract_java_visibility(node, source),
         language: Language::Java,
         parent: Some(parent_id),
@@ -691,5 +691,77 @@ fn collect_type_names(source: &[u8], node: &tree_sitter::Node, out: &mut Vec<Str
                 collect_type_names(source, &child, out);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extractor::LanguageExtractor;
+
+    fn extract(src: &str) -> (Vec<SymbolNode>, Vec<RawEdge>) {
+        let extractor = JavaExtractor;
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&extractor.tree_sitter_language()).unwrap();
+        let tree = parser.parse(src.as_bytes(), None).unwrap();
+        let r = extractor.extract(src.as_bytes(), &tree, Path::new("Test.java"));
+        (r.symbols, r.raw_edges)
+    }
+
+    fn find<'a>(syms: &'a [SymbolNode], name: &str) -> Option<&'a SymbolNode> {
+        syms.iter().find(|s| s.name == name)
+    }
+
+    #[test]
+    fn extracts_class_and_method() {
+        let src = "public class Foo { public int bar() { return 42; } }\n";
+        let (syms, _) = extract(src);
+        assert!(find(&syms, "Foo").is_some());
+        let m = find(&syms, "Foo.bar").expect("Foo.bar missing");
+        assert_eq!(m.kind, SymbolKind::Method);
+        assert_eq!(m.visibility, Visibility::Public);
+        assert_eq!(m.language, Language::Java);
+    }
+
+    #[test]
+    fn private_method_visibility() {
+        let src = "public class Foo { private int bar() { return 42; } }\n";
+        let (syms, _) = extract(src);
+        let m = find(&syms, "Foo.bar").expect("Foo.bar missing");
+        assert_eq!(m.visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn extracts_interface() {
+        let src = "public interface Greet { void hello(); }\n";
+        let (syms, _) = extract(src);
+        assert_eq!(find(&syms, "Greet").map(|s| s.kind), Some(SymbolKind::Interface));
+    }
+
+    #[test]
+    fn extracts_enum_and_record() {
+        let src = "public enum Color { RED, GREEN }\npublic record Point(int x, int y) {}\n";
+        let (syms, _) = extract(src);
+        assert_eq!(find(&syms, "Color").map(|s| s.kind), Some(SymbolKind::Enum));
+        assert_eq!(find(&syms, "Point").map(|s| s.kind), Some(SymbolKind::Record));
+    }
+
+    #[test]
+    fn extracts_extends_and_implements() {
+        let src = "public interface Greet {}\npublic class Animal {}\npublic class Dog extends Animal implements Greet {}\n";
+        let (_, edges) = extract(src);
+        let extends: Vec<_> = edges.iter().filter(|e| e.kind == EdgeKind::Extends).collect();
+        let implements: Vec<_> = edges.iter().filter(|e| e.kind == EdgeKind::Implements).collect();
+        assert!(!extends.is_empty(), "expected EXTENDS edge");
+        assert!(!implements.is_empty(), "expected IMPLEMENTS edge");
+    }
+
+    #[test]
+    fn extracts_javadoc_comment() {
+        let src = "/**\n * A foo widget.\n * @author someone\n */\npublic class Foo { }\n";
+        let (syms, _) = extract(src);
+        let f = find(&syms, "Foo").expect("Foo missing");
+        let doc = f.doc_comment.as_deref().unwrap_or("");
+        assert!(doc.contains("A foo widget"), "doc was: {doc:?}");
     }
 }
