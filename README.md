@@ -12,7 +12,7 @@ ast-graph hotspots
 
 ## Features
 
-- **Multi-language** — Rust, Python, JavaScript/TypeScript, C# (.NET), Java
+- **Multi-language** — Rust, Python, JavaScript/TypeScript, C# (.NET), Java, Go
 - **AST compression** — strips full syntax trees down to structural nodes only (~90% reduction)
 - **Class-context-aware resolution** — `this.method()` / `self.method()` calls resolve to the correct class, not every method with that name across the codebase
 - **Cross-file resolution** — resolves function calls, imports, type references, inheritance across files
@@ -427,7 +427,7 @@ FalkorDB stores the same data as a property graph. Every symbol is a `:Symbol` n
 | `line_start` / `line_end` | int | definition range |
 | `signature` / `doc_comment` | string? | may be null |
 | `visibility` | string | `Public`, `Private`, `Protected`, `Internal` |
-| `language` | string | `rust`, `python`, `javascript`, `typescript`, `csharp`, `java` |
+| `language` | string | `rust`, `python`, `javascript`, `typescript`, `csharp`, `java`, `go` |
 
 Relationship types: `CALLS`, `CONTAINS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `OVERRIDES`. Every relationship carries a `line` property — **the source line where the relationship originates** (call site for `CALLS`, not the callee's definition line). `line` is `0` when no meaningful line exists (mostly structural `CONTAINS`).
 
@@ -440,6 +440,7 @@ Relationship types: `CALLS`, `CONTAINS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `RE
 | **JavaScript/TypeScript** | `.js/.ts/.tsx` | function, class, arrow fn, import, interface, enum, type alias |
 | **C# (.NET)** | `.cs` | class, method, constructor, interface, using, namespace, record, enum |
 | **Java** | `.java` | class, interface, enum, record, method, constructor, field, import, package, extends, implements |
+| **Go** | `.go` | package, func, method (pointer + value receivers), struct, interface, type alias, import, const, field |
 
 ## Edge Types
 
