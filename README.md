@@ -21,6 +21,7 @@ ast-graph hotspots
 - **Git-aware analysis** — `blast-radius`, `changed-symbols`, and `dead-code` bring PR review and refactor planning onto the graph
 - **SQL / Cypher escape hatch** — run arbitrary SQL (SQLite) or Cypher (FalkorDB) against the graph
 - **AI context export** — compact skeleton format for feeding into LLMs
+- **Doc comments captured by default** — function/class/method docstrings, JSDoc, `///` comments, JavaDoc, etc. are stored on every symbol; pass `--no-doc-comments` to skip them for a leaner graph
 - **Self-contained default** — SQLite backend needs no Docker or external services; single binary + `.db` file
 - **Incremental scan** — only re-parses changed files on re-scan
 
@@ -93,7 +94,8 @@ cargo build --release
 ## CLI Commands
 
 ```
-ast-graph scan <path>                 Scan a directory and build the code graph
+ast-graph scan <path> [--clean] [--no-doc-comments]
+                                      Scan a directory and build the code graph
 ast-graph symbol <name>               Look up a symbol — callers, callees, members
 ast-graph hotspots [--limit 20]       Most connected symbols (architectural hotspots)
 ast-graph call-chain <name>           Trace call chain from a function (recursive)
@@ -425,7 +427,7 @@ FalkorDB stores the same data as a property graph. Every symbol is a `:Symbol` n
 | `kind` | string | `File`, `Class`, `Method`, `Function`, `Interface`, `Package`, … (see [SymbolKind](crates/ast-graph-core/src/symbol.rs)) |
 | `file_path` | string | absolute path |
 | `line_start` / `line_end` | int | definition range |
-| `signature` / `doc_comment` | string? | may be null |
+| `signature` / `doc_comment` | string? | `doc_comment` populated by default from preceding `///`, `/** */`, JSDoc, JavaDoc, or Python docstrings; null when source has no doc or `--no-doc-comments` was used |
 | `visibility` | string | `Public`, `Private`, `Protected`, `Internal` |
 | `language` | string | `rust`, `python`, `javascript`, `typescript`, `csharp`, `java`, `go` |
 
