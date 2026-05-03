@@ -52,6 +52,11 @@ enum Commands {
         /// Clear existing graph before scanning
         #[arg(long)]
         clean: bool,
+
+        /// Skip doc-comment extraction (smaller graph, faster scan).
+        /// By default doc comments are extracted for functions, methods, classes, etc.
+        #[arg(long)]
+        no_doc_comments: bool,
     },
 
     /// Export the graph in various formats
@@ -220,8 +225,8 @@ fn main() -> Result<()> {
     let storage = build_storage(&cli, &fallback_root)?;
 
     match cli.command {
-        Commands::Scan { path, clean } => {
-            commands::scan::run(&path, storage.as_ref(), clean)?;
+        Commands::Scan { path, clean, no_doc_comments } => {
+            commands::scan::run(&path, storage.as_ref(), clean, no_doc_comments)?;
         }
         Commands::Export { .. } => unreachable!("handled above"),
         Commands::Query { query } => {

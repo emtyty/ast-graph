@@ -9,8 +9,27 @@ use crate::extractor::ExtractResult;
 use crate::incremental::{build_hash_map, discover_files};
 use crate::lang::get_extractor;
 
-/// Parse an entire project directory and build a CodeGraph.
+/// Options controlling parse behavior.
+#[derive(Debug, Clone)]
+pub struct ParseOptions {
+    /// When true, populate `SymbolNode.doc_comment` from preceding comments
+    /// (or Python docstrings) during extraction.  Default: true.
+    pub extract_doc_comments: bool,
+}
+
+impl Default for ParseOptions {
+    fn default() -> Self {
+        Self { extract_doc_comments: true }
+    }
+}
+
+/// Parse an entire project directory and build a CodeGraph (default options).
 pub fn parse_project(root: &Path) -> Result<CodeGraph> {
+    parse_project_with_options(root, &ParseOptions::default())
+}
+
+/// Parse an entire project directory using the given options.
+pub fn parse_project_with_options(root: &Path, options: &ParseOptions) -> Result<CodeGraph> {
     let root = root.canonicalize()?;
     let mut graph = CodeGraph::new(root.clone());
 
@@ -25,7 +44,10 @@ pub fn parse_project(root: &Path) -> Result<CodeGraph> {
         .filter_map(|file| {
             let result = parse_single_file(&file.path, file.language);
             match result {
-                Ok(extract) => Some((file.path.clone(), extract)),
+                Ok(mut extract) => {
+                    apply_options(&mut extract, options);
+                    Some((file.path.clone(), extract))
+                }
                 Err(e) => {
                     tracing::warn!("Failed to parse {}: {}", file.path.display(), e);
                     None
@@ -70,8 +92,27 @@ pub fn parse_single_file(path: &Path, language: Language) -> Result<ExtractResul
     Ok(extractor.extract(&source, &tree, path))
 }
 
-/// Incrementally update a graph: only re-parse changed files.
+/// Apply post-extraction options to an ExtractResult.  Currently strips
+/// doc_comment from every symbol when `extract_doc_comments` is disabled.
+fn apply_options(extract: &mut ExtractResult, options: &ParseOptions) {
+    if !options.extract_doc_comments {
+        for symbol in extract.symbols.iter_mut() {
+            symbol.doc_comment = None;
+        }
+    }
+}
+
+/// Incrementally update a graph: only re-parse changed files (default options).
 pub fn incremental_update(graph: &mut CodeGraph, root: &Path) -> Result<IncrementalStats> {
+    incremental_update_with_options(graph, root, &ParseOptions::default())
+}
+
+/// Incrementally update a graph using the given options.
+pub fn incremental_update_with_options(
+    graph: &mut CodeGraph,
+    root: &Path,
+    options: &ParseOptions,
+) -> Result<IncrementalStats> {
     let root = root.canonicalize()?;
     let files = discover_files(&root);
     let current_hashes = build_hash_map(&files);
@@ -107,9 +148,10 @@ pub fn incremental_update(graph: &mut CodeGraph, root: &Path) -> Result<Incremen
     let results: Vec<(std::path::PathBuf, ExtractResult)> = to_parse
         .par_iter()
         .filter_map(|(path, lang)| {
-            parse_single_file(path, *lang)
-                .ok()
-                .map(|r| (path.clone(), r))
+            parse_single_file(path, *lang).ok().map(|mut r| {
+                apply_options(&mut r, options);
+                (path.clone(), r)
+            })
         })
         .collect();
 

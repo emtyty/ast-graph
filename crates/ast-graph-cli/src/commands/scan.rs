@@ -1,10 +1,16 @@
 use anyhow::Result;
+use ast_graph_parse::ParseOptions;
 use ast_graph_storage::GraphStorage;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 use tracing::info;
 
-pub fn run(path: &str, storage: &dyn GraphStorage, clean: bool) -> Result<()> {
+pub fn run(
+    path: &str,
+    storage: &dyn GraphStorage,
+    clean: bool,
+    no_doc_comments: bool,
+) -> Result<()> {
     let path = Path::new(path);
 
     if clean {
@@ -16,7 +22,10 @@ pub fn run(path: &str, storage: &dyn GraphStorage, clean: bool) -> Result<()> {
     pb.set_style(ProgressStyle::default_spinner().template("{spinner:.green} {msg}")?);
     pb.set_message("Scanning source files...");
 
-    let mut graph = ast_graph_parse::parse_project(path)?;
+    let options = ParseOptions {
+        extract_doc_comments: !no_doc_comments,
+    };
+    let mut graph = ast_graph_parse::parse_project_with_options(path, &options)?;
     pb.set_message(format!(
         "Parsed {} files, {} symbols",
         graph.metadata.total_files, graph.metadata.total_nodes
