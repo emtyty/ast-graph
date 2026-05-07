@@ -2,6 +2,8 @@ use ast_graph_core::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::info;
 
+use crate::mro::{c3_linearize, enclosing_class, extract_super_method, lookup_super_method};
+
 /// Resolve raw edges (string-based targets) into concrete edges (NodeId-based).
 /// This is the cross-file resolution phase that connects symbols across files.
 fn load_path_aliases(root: &std::path::Path) -> Vec<(String, String)> {
@@ -88,6 +90,12 @@ pub fn resolve_edges(graph: &mut CodeGraph, root: &std::path::Path) {
     }
     let name_index = build_name_index(graph);
     let file_index = build_file_index(graph);
+    // Maps NodeId -> file_path so we can tier same-file matches at confidence 0.95.
+    let node_file: FxHashMap<NodeId, String> = graph
+        .nodes
+        .iter()
+        .map(|(id, n)| (*id, n.file_path.to_string_lossy().to_string()))
+        .collect();
 
     let raw_edges = std::mem::take(&mut graph.raw_edges);
     let mut resolved = 0;
@@ -117,7 +125,32 @@ pub fn resolve_edges(graph: &mut CodeGraph, root: &std::path::Path) {
         .map(|n| n.name.clone())
         .collect();
 
+    // Helper: assign confidence tier to a name-based match.
+    // Same-file → 0.95, single global hit → 0.5 (or import-scoped 0.9 if we
+    // could prove the target is in the caller's import set; the resolver
+    // doesn't track that today, so we conservatively use 0.5 for the global
+    // tier and 0.95 for same-file).
+    let pick_confidence = |source_id: NodeId, target_id: NodeId, hit_count: usize| -> f32 {
+        let same_file = node_file
+            .get(&source_id)
+            .zip(node_file.get(&target_id))
+            .map_or(false, |(a, b)| a == b);
+        if same_file {
+            CONFIDENCE_SAME_FILE
+        } else if hit_count == 1 {
+            CONFIDENCE_IMPORT_SCOPED
+        } else {
+            CONFIDENCE_GLOBAL
+        }
+    };
+
+    // Two-pass resolution: structural / inheritance edges FIRST so the CALLS
+    // pass below can use EXTENDS to do Python C3 MRO resolution for `super().X`.
     for raw in &raw_edges {
+        // Skip CALLS in the first pass — handled below.
+        if raw.kind == EdgeKind::Calls {
+            continue;
+        }
         match raw.kind {
             EdgeKind::Contains => {
                 // Contains edges use NodeId encoded as string in target_name
@@ -131,6 +164,7 @@ pub fn resolve_edges(graph: &mut CodeGraph, root: &std::path::Path) {
                             target,
                             kind: EdgeKind::Contains,
                             source_line: raw.source_line,
+                            confidence: CONFIDENCE_EXACT,
                         });
                         resolved += 1;
                         continue;
@@ -138,32 +172,7 @@ pub fn resolve_edges(graph: &mut CodeGraph, root: &std::path::Path) {
                 }
                 unresolved += 1;
             }
-            EdgeKind::Calls => {
-                if let Some(targets) = resolve_call_target(&raw.target_name, &name_index) {
-                    for target in targets {
-                        graph.add_edge(Edge {
-                            source: raw.source,
-                            target,
-                            kind: EdgeKind::Calls,
-                            source_line: raw.source_line,
-                        });
-                        resolved += 1;
-                    }
-                } else {
-                    let t = raw.target_name.as_str();
-                    let head = t.split('.').next().unwrap_or(t);
-                    let is_ext = external_names.contains(&t)
-                        || external_names.contains(&head)
-                        || external_head_prefixes.iter().any(|p| t.starts_with(p))
-                        || (t.contains('.') && constant_heads.contains(head));
-                    if is_ext {
-                        external += 1;
-                    } else {
-                        unresolved += 1;
-                        *unresolved_calls.entry(raw.target_name.clone()).or_insert(0) += 1;
-                    }
-                }
-            }
+            EdgeKind::Calls => unreachable!("CALLS deferred to pass 2"),
             EdgeKind::Imports => {
                 // Pre-resolved target: when the parser already knows the exact
                 // node this import refers to (e.g. C# `using` pointing at the
@@ -179,6 +188,7 @@ pub fn resolve_edges(graph: &mut CodeGraph, root: &std::path::Path) {
                                 target,
                                 kind: EdgeKind::Imports,
                                 source_line: raw.source_line,
+                                confidence: CONFIDENCE_EXACT,
                             });
                             resolved += 1;
                             continue;
@@ -192,19 +202,44 @@ pub fn resolve_edges(graph: &mut CodeGraph, root: &std::path::Path) {
                 } else {
                     None
                 };
-                let targets = raw
+                // By-path resolution is exact (1.0); name-based fallback is
+                // global tier.
+                let by_path_targets = raw
                     .target_module
                     .as_deref()
                     .and_then(|abs| resolve_import_by_path(abs, &file_index))
-                    .or_else(|| alias_resolved.as_deref().and_then(|abs| resolve_import_by_path(abs, &file_index)))
-                    .or_else(|| resolve_import_by_name(&raw.target_name, &name_index));
-                if let Some(targets) = targets {
+                    .or_else(|| {
+                        alias_resolved
+                            .as_deref()
+                            .and_then(|abs| resolve_import_by_path(abs, &file_index))
+                    });
+                if let Some(targets) = by_path_targets {
                     for target in targets {
                         graph.add_edge(Edge {
                             source: raw.source,
                             target,
                             kind: EdgeKind::Imports,
                             source_line: raw.source_line,
+                            confidence: CONFIDENCE_EXACT,
+                        });
+                        resolved += 1;
+                    }
+                } else if let Some(targets) =
+                    resolve_import_by_name(&raw.target_name, &name_index)
+                {
+                    let hit_count = targets.len();
+                    for target in targets {
+                        let confidence = if hit_count == 1 {
+                            CONFIDENCE_IMPORT_SCOPED
+                        } else {
+                            CONFIDENCE_GLOBAL
+                        };
+                        graph.add_edge(Edge {
+                            source: raw.source,
+                            target,
+                            kind: EdgeKind::Imports,
+                            source_line: raw.source_line,
+                            confidence,
                         });
                         resolved += 1;
                     }
@@ -214,12 +249,15 @@ pub fn resolve_edges(graph: &mut CodeGraph, root: &std::path::Path) {
             }
             EdgeKind::Extends | EdgeKind::Implements => {
                 if let Some(targets) = resolve_type_target(&raw.target_name, &name_index) {
+                    let hit_count = targets.len();
                     for target in targets {
+                        let confidence = pick_confidence(raw.source, target, hit_count);
                         graph.add_edge(Edge {
                             source: raw.source,
                             target,
                             kind: raw.kind,
                             source_line: raw.source_line,
+                            confidence,
                         });
                         resolved += 1;
                     }
@@ -229,12 +267,15 @@ pub fn resolve_edges(graph: &mut CodeGraph, root: &std::path::Path) {
             }
             EdgeKind::References => {
                 if let Some(targets) = resolve_type_target(&raw.target_name, &name_index) {
+                    let hit_count = targets.len();
                     for target in targets {
+                        let confidence = pick_confidence(raw.source, target, hit_count);
                         graph.add_edge(Edge {
                             source: raw.source,
                             target,
                             kind: EdgeKind::References,
                             source_line: raw.source_line,
+                            confidence,
                         });
                         resolved += 1;
                     }
@@ -242,10 +283,108 @@ pub fn resolve_edges(graph: &mut CodeGraph, root: &std::path::Path) {
                     unresolved += 1;
                 }
             }
+            EdgeKind::HandlesRoute => {
+                // Route extractors encode the Route NodeId (hex) in target_name.
+                if let Some(target) = NodeId::from_hex(&raw.target_name) {
+                    if graph.nodes.contains_key(&target) {
+                        graph.add_edge(Edge {
+                            source: raw.source,
+                            target,
+                            kind: EdgeKind::HandlesRoute,
+                            source_line: raw.source_line,
+                            confidence: CONFIDENCE_EXACT,
+                        });
+                        resolved += 1;
+                        continue;
+                    }
+                }
+                unresolved += 1;
+            }
             _ => {
                 unresolved += 1;
             }
         }
+    }
+
+    // Pass 2: CALLS. Now EXTENDS edges exist, so Python C3 MRO can resolve
+    // `super().method` precisely instead of fanning out via the global name index.
+    // Build the parents map once using the just-resolved EXTENDS edges.
+    let py_parents = crate::mro::python_parents_map(graph);
+    let mut mro_cache: FxHashMap<NodeId, Option<Vec<NodeId>>> = FxHashMap::default();
+    let mut super_resolved = 0usize;
+
+    for raw in &raw_edges {
+        if raw.kind != EdgeKind::Calls {
+            continue;
+        }
+
+        // 1) Python `super().method` — try MRO walk first.
+        if let Some(method_name) = extract_super_method(&raw.target_name) {
+            if graph
+                .nodes
+                .get(&raw.source)
+                .map_or(false, |n| n.language == Language::Python)
+            {
+                if let Some(class_id) = enclosing_class(graph, raw.source) {
+                    // Make sure we have an MRO for this class.
+                    if !mro_cache.contains_key(&class_id) {
+                        let computed = c3_linearize(class_id, &py_parents);
+                        mro_cache.insert(class_id, computed);
+                    }
+                    if let Some(target) = lookup_super_method(
+                        graph,
+                        class_id,
+                        method_name,
+                        &mut mro_cache,
+                        &py_parents,
+                    ) {
+                        graph.add_edge(Edge {
+                            source: raw.source,
+                            target,
+                            kind: EdgeKind::Calls,
+                            source_line: raw.source_line,
+                            confidence: CONFIDENCE_EXACT,
+                        });
+                        resolved += 1;
+                        super_resolved += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // 2) Fallback: existing flat-name-index resolution.
+        if let Some(targets) = resolve_call_target(&raw.target_name, &name_index) {
+            let hit_count = targets.len();
+            for target in targets {
+                let confidence = pick_confidence(raw.source, target, hit_count);
+                graph.add_edge(Edge {
+                    source: raw.source,
+                    target,
+                    kind: EdgeKind::Calls,
+                    source_line: raw.source_line,
+                    confidence,
+                });
+                resolved += 1;
+            }
+        } else {
+            let t = raw.target_name.as_str();
+            let head = t.split('.').next().unwrap_or(t);
+            let is_ext = external_names.contains(&t)
+                || external_names.contains(&head)
+                || external_head_prefixes.iter().any(|p| t.starts_with(p))
+                || (t.contains('.') && constant_heads.contains(head));
+            if is_ext {
+                external += 1;
+            } else {
+                unresolved += 1;
+                *unresolved_calls.entry(raw.target_name.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    if super_resolved > 0 {
+        info!("Resolved {} Python super().X calls via C3 MRO", super_resolved);
     }
 
     graph.refresh_metadata();

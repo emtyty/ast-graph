@@ -24,6 +24,10 @@ anyhow = "1"
 sha2 = "0.10"
 rustc-hash = "2"
 
+# Regex (already pulled in transitively by tree-sitter; declared here so
+# crates can use it directly without re-pulling).
+regex = "1"
+
 # Tree-sitter
 tree-sitter = "0.25"
 

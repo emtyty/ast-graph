@@ -22,3 +22,4 @@ rayon = { workspace = true }
 sha2 = { workspace = true }
 tracing = { workspace = true }
 rustc-hash = { workspace = true }
+regex = { workspace = true }

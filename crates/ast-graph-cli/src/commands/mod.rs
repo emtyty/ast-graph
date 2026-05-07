@@ -8,3 +8,7 @@ pub mod symbol;
 pub mod dead_code;
 pub mod blast_radius;
 pub mod changed_symbols;
+pub mod search;
+pub mod routes;
+pub mod processes;
+pub mod mcp;

@@ -89,7 +89,24 @@ pub fn parse_single_file(path: &Path, language: Language) -> Result<ExtractResul
         .parse(&source, None)
         .ok_or_else(|| anyhow::anyhow!("tree-sitter failed to parse {}", path.display()))?;
 
-    Ok(extractor.extract(&source, &tree, path))
+    let mut result = extractor.extract(&source, &tree, path);
+
+    // Post-pass: route extraction. Adds Route nodes + HandlesRoute raw edges
+    // for any HTTP route declarations in this file.
+    let mut extra_symbols: Vec<SymbolNode> = Vec::new();
+    let mut extra_edges: Vec<RawEdge> = Vec::new();
+    crate::routes::extract_routes(
+        &source,
+        path,
+        language,
+        &result.symbols,
+        &mut extra_symbols,
+        &mut extra_edges,
+    );
+    result.symbols.extend(extra_symbols);
+    result.raw_edges.extend(extra_edges);
+
+    Ok(result)
 }
 
 /// Apply post-extraction options to an ExtractResult.  Currently strips

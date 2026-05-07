@@ -6,7 +6,8 @@ use tracing::info;
 /// v1: initial
 /// v2: FK constraints (CASCADE on edges, SET NULL on nodes.parent_id)
 /// v3: edges.source_line column + expanded PK (source_id, target_id, kind, source_line)
-pub const SCHEMA_VERSION: i64 = 3;
+/// v4: edges.confidence column (REAL NOT NULL DEFAULT 1.0)
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Create all tables and indexes for the code graph.
 /// Foreign-key constraints enforce referential integrity:
@@ -38,7 +39,18 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             target_id    TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
             kind         TEXT NOT NULL,
             source_line  INTEGER NOT NULL DEFAULT 0,
+            confidence   REAL NOT NULL DEFAULT 1.0,
             PRIMARY KEY (source_id, target_id, kind, source_line)
+        );
+
+        -- FTS5 virtual table for keyword search across symbol metadata.
+        -- Kept in sync with `nodes` via triggers below. Bundled with rusqlite.
+        CREATE VIRTUAL TABLE IF NOT EXISTS symbol_fts USING fts5(
+            id UNINDEXED,
+            name,
+            signature,
+            doc_comment,
+            tokenize='unicode61'
         );
 
         CREATE TABLE IF NOT EXISTS file_hashes (
@@ -68,6 +80,23 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
 
         -- Line-level edge index: \"all call sites from this source ordered by line\"
         CREATE INDEX IF NOT EXISTS idx_edges_source_line   ON edges(source_id, source_line);
+
+        -- Confidence index: lets queries quickly skip low-confidence edges
+        CREATE INDEX IF NOT EXISTS idx_edges_confidence    ON edges(confidence);
+
+        -- Keep symbol_fts in sync with nodes
+        CREATE TRIGGER IF NOT EXISTS nodes_fts_ai AFTER INSERT ON nodes BEGIN
+            INSERT INTO symbol_fts(id, name, signature, doc_comment)
+            VALUES (NEW.id, NEW.name, COALESCE(NEW.signature,''), COALESCE(NEW.doc_comment,''));
+        END;
+        CREATE TRIGGER IF NOT EXISTS nodes_fts_ad AFTER DELETE ON nodes BEGIN
+            DELETE FROM symbol_fts WHERE id = OLD.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS nodes_fts_au AFTER UPDATE ON nodes BEGIN
+            DELETE FROM symbol_fts WHERE id = OLD.id;
+            INSERT INTO symbol_fts(id, name, signature, doc_comment)
+            VALUES (NEW.id, NEW.name, COALESCE(NEW.signature,''), COALESCE(NEW.doc_comment,''));
+        END;
         ",
     )?;
 
@@ -182,8 +211,47 @@ pub fn migrate_schema(conn: &Connection) -> Result<()> {
         info!("Schema migration to v3 complete (re-scan to populate source_line)");
     }
 
-    // Recreate indexes (dropped with tables)
+    // v3 -> v4: add edges.confidence column + symbol_fts virtual table.
+    // ALTER TABLE ADD COLUMN is idempotent-friendly: succeeds the first run,
+    // then `create_schema` below regenerates the FTS table and triggers.
+    if version < 4 {
+        info!("Migrating database schema to version 4 (adding edges.confidence + FTS5)...");
+        // Drop pre-existing FTS artefacts so the next create_schema rebuilds them clean.
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS nodes_fts_ai;
+             DROP TRIGGER IF EXISTS nodes_fts_ad;
+             DROP TRIGGER IF EXISTS nodes_fts_au;
+             DROP TABLE IF EXISTS symbol_fts;",
+        )?;
+        // ADD COLUMN may fail if the column already exists from a half-finished run.
+        let _ = conn.execute(
+            "ALTER TABLE edges ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0",
+            [],
+        );
+        conn.execute("INSERT OR REPLACE INTO schema_version VALUES (4)", [])?;
+        info!("Schema migration to v4 complete");
+    }
+
+    // Recreate indexes + FTS table + triggers (dropped with tables).
     create_schema(conn)?;
+
+    // Backfill the FTS table from existing nodes — `create_schema` only
+    // creates the empty virtual table; triggers from now on keep it in sync.
+    let fts_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM symbol_fts", [], |r| r.get(0))
+        .unwrap_or(0);
+    if fts_rows == 0 {
+        let nodes_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
+            .unwrap_or(0);
+        if nodes_rows > 0 {
+            conn.execute_batch(
+                "INSERT INTO symbol_fts(id, name, signature, doc_comment)
+                 SELECT id, name, COALESCE(signature,''), COALESCE(doc_comment,'') FROM nodes;",
+            )?;
+            info!("Backfilled symbol_fts with {} rows", nodes_rows);
+        }
+    }
     Ok(())
 }
 

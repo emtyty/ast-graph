@@ -67,6 +67,12 @@ pub trait GraphStorage: Send + Sync {
     /// Execute a backend-native query (SQL for SQLite, Cypher for FalkorDB).
     fn run_raw_query(&self, query: &str) -> Result<Vec<serde_json::Value>>;
 
+    /// Full-text keyword search over `name`, `signature`, and `doc_comment`.
+    /// Returns ranked results (BM25 on SQLite, plain text scan on FalkorDB).
+    /// Each result row carries `id`, `name`, `kind`, `file_path`, `line_start`,
+    /// and `score` (lower is better for SQLite BM25).
+    fn search_symbols(&self, query: &str, limit: usize) -> Result<Vec<serde_json::Value>>;
+
     /// Human-readable backend name for logging/UI.
     fn backend_name(&self) -> &'static str;
 }

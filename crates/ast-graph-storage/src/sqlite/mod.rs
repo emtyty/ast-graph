@@ -89,8 +89,8 @@ impl GraphStorage for SqliteStorage {
         let mut skipped = 0;
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT OR IGNORE INTO edges (source_id, target_id, kind, source_line)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR IGNORE INTO edges (source_id, target_id, kind, source_line, confidence)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
             )?;
             for edges in graph.adjacency.values() {
                 for edge in edges {
@@ -105,6 +105,7 @@ impl GraphStorage for SqliteStorage {
                         edge.target.to_string(),
                         edge.kind.as_neo4j_type(),
                         edge.source_line as i64,
+                        edge.confidence as f64,
                     ])?;
                     edge_count += affected;
                 }
@@ -116,8 +117,8 @@ impl GraphStorage for SqliteStorage {
         // CONTAINS (file → top-level items) is deduped by the composite PK.
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT OR IGNORE INTO edges (source_id, target_id, kind, source_line)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR IGNORE INTO edges (source_id, target_id, kind, source_line, confidence)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
             )?;
             for node in graph.nodes.values() {
                 let parent = match node.parent {
@@ -129,6 +130,7 @@ impl GraphStorage for SqliteStorage {
                     node.id.to_string(),
                     "CONTAINS",
                     node.line_range.0 as i64,
+                    1.0_f64,
                 ])?;
                 edge_count += affected;
             }
@@ -221,7 +223,9 @@ impl GraphStorage for SqliteStorage {
         }
 
         // Edges
-        let mut stmt = conn.prepare("SELECT source_id, target_id, kind, source_line FROM edges")?;
+        let mut stmt = conn.prepare(
+            "SELECT source_id, target_id, kind, source_line, confidence FROM edges",
+        )?;
         let edges: Vec<Edge> = stmt
             .query_map([], |row| {
                 Ok((
@@ -229,14 +233,21 @@ impl GraphStorage for SqliteStorage {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, i64>(3)?,
+                    row.get::<_, f64>(4)?,
                 ))
             })?
             .filter_map(|r| r.ok())
-            .filter_map(|(src, tgt, kind_str, line)| {
+            .filter_map(|(src, tgt, kind_str, line, conf)| {
                 let source = NodeId::from_hex(&src)?;
                 let target = NodeId::from_hex(&tgt)?;
                 let kind = EdgeKind::from_neo4j_type(&kind_str)?;
-                Some(Edge { source, target, kind, source_line: line as u32 })
+                Some(Edge {
+                    source,
+                    target,
+                    kind,
+                    source_line: line as u32,
+                    confidence: conf as f32,
+                })
             })
             .collect();
         for edge in edges {
@@ -787,6 +798,52 @@ impl GraphStorage for SqliteStorage {
             .filter_map(|r| r.ok())
             .collect();
 
+        Ok(results)
+    }
+
+    fn search_symbols(&self, query: &str, limit: usize) -> Result<Vec<serde_json::Value>> {
+        let conn = self.conn.lock().unwrap();
+        // FTS5 MATCH expects tokens, not arbitrary text. Sanitize: split into
+        // alphanumeric tokens and OR-join. Anything else (punctuation,
+        // operators) is dropped — keeps malicious / malformed input safe.
+        let tokens: Vec<String> = query
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                // Suffix wildcard so partial matches work ("auth" matches "authn").
+                format!("{}*", s.replace('"', ""))
+            })
+            .collect();
+        if tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+        let match_expr = tokens.join(" OR ");
+        let mut stmt = conn.prepare(
+            "SELECT n.id, n.name, n.kind, n.file_path, n.line_start, n.line_end,
+                    n.signature, n.doc_comment, bm25(symbol_fts) AS score
+             FROM symbol_fts
+             JOIN nodes n ON n.id = symbol_fts.id
+             WHERE symbol_fts MATCH ?1
+               AND n.kind NOT IN ('File','Import')
+             ORDER BY score
+             LIMIT ?2",
+        )?;
+        let results: Vec<serde_json::Value> = stmt
+            .query_map(params![match_expr, limit as i64], |row| {
+                Ok(serde_json::json!({
+                    "id":          row.get::<_, String>(0)?,
+                    "name":        row.get::<_, String>(1)?,
+                    "kind":        row.get::<_, String>(2)?,
+                    "file_path":   row.get::<_, String>(3)?,
+                    "line_start":  row.get::<_, i64>(4)?,
+                    "line_end":    row.get::<_, i64>(5)?,
+                    "signature":   row.get::<_, Option<String>>(6)?,
+                    "doc_comment": row.get::<_, Option<String>>(7)?,
+                    "score":       row.get::<_, f64>(8)?,
+                }))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(results)
     }
 

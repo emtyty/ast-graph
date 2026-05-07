@@ -250,6 +250,14 @@ fn fv_get_i64(v: &FalkorValue) -> i64 {
     }
 }
 
+fn fv_get_f64(v: &FalkorValue) -> Option<f64> {
+    match v {
+        FalkorValue::F64(f) => Some(*f),
+        FalkorValue::I64(n) => Some(*n as f64),
+        _ => None,
+    }
+}
+
 // -------- GraphStorage impl -----------------------------------------------
 
 impl GraphStorage for FalkorStorage {
@@ -310,7 +318,7 @@ impl GraphStorage for FalkorStorage {
         let mut skipped = 0usize;
         for kind in EdgeKind::ALL {
             let kind_str = kind.as_neo4j_type();
-            let mut all_of_kind: Vec<(String, String, u32)> = Vec::new();
+            let mut all_of_kind: Vec<(String, String, u32, f32)> = Vec::new();
             for edges in graph.adjacency.values() {
                 for e in edges {
                     if e.kind != *kind {
@@ -326,6 +334,7 @@ impl GraphStorage for FalkorStorage {
                         e.source.to_string(),
                         e.target.to_string(),
                         e.source_line,
+                        e.confidence,
                     ));
                 }
             }
@@ -337,6 +346,7 @@ impl GraphStorage for FalkorStorage {
                                 p.to_string(),
                                 node.id.to_string(),
                                 node.line_range.0,
+                                1.0,
                             ));
                         }
                     }
@@ -349,12 +359,13 @@ impl GraphStorage for FalkorStorage {
             for chunk in all_of_kind.chunks(EDGE_BATCH) {
                 let list = chunk
                     .iter()
-                    .map(|(s, t, l)| {
+                    .map(|(s, t, l, c)| {
                         format!(
-                            "{{src:{},tgt:{},line:{}}}",
+                            "{{src:{},tgt:{},line:{},confidence:{}}}",
                             cypher_escape_string(s),
                             cypher_escape_string(t),
-                            l
+                            l,
+                            c
                         )
                     })
                     .collect::<Vec<_>>()
@@ -362,7 +373,8 @@ impl GraphStorage for FalkorStorage {
                 let cypher = format!(
                     "UNWIND [{list}] AS e \
                      MATCH (a:Symbol {{id: e.src}}), (b:Symbol {{id: e.tgt}}) \
-                     MERGE (a)-[r:{kind_str} {{line: e.line}}]->(b)"
+                     MERGE (a)-[r:{kind_str} {{line: e.line}}]->(b) \
+                     SET r.confidence = e.confidence"
                 );
                 self.run_cypher(&cypher, &HashMap::new())?;
                 edge_count += chunk.len();
@@ -522,7 +534,7 @@ impl GraphStorage for FalkorStorage {
 
         // Load all edges (all relationship types).
         let rows = self.run_cypher(
-            "MATCH (a:Symbol)-[r]->(b:Symbol) RETURN a.id, b.id, type(r), r.line",
+            "MATCH (a:Symbol)-[r]->(b:Symbol) RETURN a.id, b.id, type(r), r.line, r.confidence",
             &HashMap::new(),
         )?;
         for row in rows {
@@ -542,11 +554,17 @@ impl GraphStorage for FalkorStorage {
                 None => continue,
             };
             let line = fv_get_i64(&row[3]) as u32;
+            let confidence = if row.len() >= 5 {
+                fv_get_f64(&row[4]).unwrap_or(1.0) as f32
+            } else {
+                1.0
+            };
             graph.add_edge(Edge {
                 source: src,
                 target: tgt,
                 kind,
                 source_line: line,
+                confidence,
             });
         }
 
@@ -1100,6 +1118,59 @@ impl GraphStorage for FalkorStorage {
                 }))
             })
             .collect())
+    }
+
+    fn search_symbols(&self, query: &str, limit: usize) -> Result<Vec<serde_json::Value>> {
+        // FalkorDB has no built-in BM25. Fall back to a CONTAINS-style scan
+        // over name + signature + doc_comment. This is the lean route — users
+        // who want hybrid search should run the SQLite backend.
+        let tokens: Vec<String> = query
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_lowercase())
+            .collect();
+        if tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+        // OR over tokens against (lower(name) CONTAINS x).
+        let predicates: Vec<String> = tokens
+            .iter()
+            .map(|t| {
+                format!(
+                    "toLower(n.name) CONTAINS '{}' OR toLower(coalesce(n.signature,'')) CONTAINS '{}' OR toLower(coalesce(n.doc_comment,'')) CONTAINS '{}'",
+                    t.replace('\'', "\\'"),
+                    t.replace('\'', "\\'"),
+                    t.replace('\'', "\\'"),
+                )
+            })
+            .collect();
+        let cypher = format!(
+            "MATCH (n:Symbol) \
+             WHERE n.kind <> 'File' AND n.kind <> 'Import' AND ({}) \
+             RETURN n.id, n.name, n.kind, n.file_path, n.line_start, n.line_end, n.signature, n.doc_comment \
+             LIMIT {}",
+            predicates.join(") OR ("),
+            limit
+        );
+        let rows = self.run_cypher(&cypher, &HashMap::new())?;
+        let mut results = Vec::new();
+        for row in rows {
+            if row.len() < 6 {
+                continue;
+            }
+            results.push(serde_json::json!({
+                "id":          fv_get_string(&row[0]).unwrap_or_default(),
+                "name":        fv_get_string(&row[1]).unwrap_or_default(),
+                "kind":        fv_get_string(&row[2]).unwrap_or_default(),
+                "file_path":   fv_get_string(&row[3]).unwrap_or_default(),
+                "line_start":  fv_get_i64(&row[4]),
+                "line_end":    fv_get_i64(&row[5]),
+                "signature":   row.get(6).and_then(fv_get_string),
+                "doc_comment": row.get(7).and_then(fv_get_string),
+                "score":       1.0_f64,
+            }));
+        }
+        Ok(results)
     }
 
     fn run_raw_query(&self, query: &str) -> Result<Vec<serde_json::Value>> {

@@ -16,9 +16,16 @@ ast-graph hotspots
 - **AST compression** — strips full syntax trees down to structural nodes only (~90% reduction)
 - **Class-context-aware resolution** — `this.method()` / `self.method()` calls resolve to the correct class, not every method with that name across the codebase
 - **Cross-file resolution** — resolves function calls, imports, type references, inheritance across files
+- **Confidence-tiered edges** — every edge carries a `confidence` score (1.0 exact / 0.95 same-file / 0.9 import-scoped / 0.5 global fallback) so queries can filter noisy matches
+- **Python C3 MRO** — `super().method()` resolves to the correct ancestor via C3 linearization, not a name-fan-out across the codebase
+- **Overload-safe IDs** — `NodeId` includes a signature digest for callable kinds, so two overloads of the same method don't collide
 - **Symbol lookup** — find any symbol by partial name, instantly see callers, callees, members
 - **Pluggable backends** — SQLite for single-machine use, FalkorDB for team/server use with Cypher
 - **Git-aware analysis** — `blast-radius`, `changed-symbols`, and `dead-code` bring PR review and refactor planning onto the graph
+- **HTTP route extraction** — `Route` nodes for Express, NestJS, FastAPI/Flask, Spring Boot, ASP.NET, Axum, Actix, chi/echo/gin, net/http
+- **Process tracing** — entry-point detection (`main`, route handlers, `test_*` functions) plus a depth-bounded BFS along CALLS edges, surfaced as `Process` nodes with `STEP_IN_PROCESS` edges
+- **Full-text search** — bundled SQLite FTS5 over name + signature + doc comment, BM25-ranked, no extra deps
+- **MCP server** — `ast-graph mcp` speaks JSON-RPC over stdio so Claude Code, Cursor, Codex, Windsurf, and OpenCode can call ast-graph natively
 - **SQL / Cypher escape hatch** — run arbitrary SQL (SQLite) or Cypher (FalkorDB) against the graph
 - **AI context export** — compact skeleton format for feeding into LLMs
 - **Doc comments captured by default** — function/class/method docstrings, JSDoc, `///` comments, JavaDoc, etc. are stored on every symbol; pass `--no-doc-comments` to skip them for a leaner graph
@@ -103,6 +110,10 @@ ast-graph blast-radius <name>         Reverse traversal: "if I change X, what el
 ast-graph changed-symbols [--base <ref>]
                                       Map a git diff to the symbols it actually touched
 ast-graph dead-code                   Functions / methods with zero incoming CALLS edges
+ast-graph search "<query>"            Full-text keyword search (BM25 over name+sig+docs)
+ast-graph routes                      List extracted HTTP routes
+ast-graph processes                   List traced execution flows (entry point + step count)
+ast-graph mcp                         Run as an MCP server over stdio
 ast-graph query "<sql|cypher>"        Run a backend-native query (SQL for SQLite, Cypher for FalkorDB)
 ast-graph stats                       Graph summary: nodes, edges, languages
 ast-graph export --format <fmt>       Export graph (json, dot, ai-context)
@@ -224,6 +235,134 @@ ast-graph dead-code --include-all          # disable vendored-file exclusions
 - **Library APIs** may be called by external consumers the graph never saw.
 
 Review the list as a candidate set, not a deletion list.
+
+## Confidence-tiered edges
+
+Every resolved edge carries a `confidence: f32` field set at resolution time:
+
+| Tier | Value | What it means |
+|---|---|---|
+| Exact | `1.0` | Structural (parent→child CONTAINS), by-path import resolution, route NodeId-encoded targets, Python C3 MRO super() match |
+| Same-file | `0.95` | Caller and target live in the same file — no cross-file ambiguity |
+| Import-scoped | `0.9` | Single global hit (the name resolves to exactly one symbol) |
+| Global fallback | `0.5` | Multiple-target name match — last-segment guess, may fan out |
+
+This lets queries trim noise:
+
+```bash
+# Only high-confidence edges
+ast-graph query "SELECT n1.name, n2.name FROM edges e
+                 JOIN nodes n1 ON n1.id = e.source_id
+                 JOIN nodes n2 ON n2.id = e.target_id
+                 WHERE e.kind = 'CALLS' AND e.confidence >= 0.9"
+
+# How fuzzy is the graph?
+ast-graph query "SELECT confidence, COUNT(*) FROM edges
+                 GROUP BY confidence ORDER BY confidence DESC"
+```
+
+The `0.5` tier is the honest "we matched on name only" bucket — it's where dynamic dispatch, dotted-call chains, and overload fan-out land.
+
+## HTTP routes and process tracing
+
+`scan` automatically extracts HTTP routes from the source and traces execution flows from entry points. Two new node kinds join the graph: `Route` (e.g. `GET /users`) and `Process` (an entry point + its call-chain BFS).
+
+### `routes` — list extracted HTTP endpoints
+
+Frameworks recognized out of the box:
+
+| Language | Frameworks |
+|---|---|
+| TypeScript / JavaScript | Express, Fastify, Koa, Hono, Bun, NestJS decorators |
+| Python | FastAPI / Flask `@app.<verb>(...)`, `@app.route(...)` |
+| Java | Spring Boot `@GetMapping`, `@PostMapping`, `@RequestMapping`, … |
+| C# | ASP.NET `[HttpGet("/x")]`, `[HttpPost(...)]`, `[Route("/x")]` |
+| Rust | Axum `Router::new().route(...)`, Actix `#[get("/x")]` |
+| Go | chi/echo/gin `r.Get(...)`, `r.HandleFunc(...)` |
+
+```bash
+ast-graph routes
+# Routes (12):
+#   GET /users          1 handler(s)  src/api/users.ts:14
+#   POST /login         1 handler(s)  src/api/auth.ts:42
+#   …
+```
+
+Each `Route` node is connected to its handler (the enclosing Function/Method) by a `HANDLES_ROUTE` edge, so you can ask "what calls a route handler?" or "which routes does this service expose?" with a single Cypher / SQL query.
+
+### `processes` — execution flows from entry points
+
+Entry-point detection covers `main` / `Main`, route handlers (every `Route` is an entry), and test functions (`test_*`, `Test*`, `*Test`). From each entry the tracer does a depth-bounded BFS along `CALLS` edges (default depth 6, max 50 steps) and emits:
+
+- a `Process` node per entry point (`name = "Process: <entry>"`)
+- an `ENTRY_POINT_OF` edge from the entry symbol to the process
+- a `STEP_IN_PROCESS` edge from each step to the process, with the step index encoded in `source_line`
+
+```bash
+ast-graph processes --limit 10
+# Processes (10):
+#   Process: GET /users         12 step(s)  src/api/users.ts:14
+#   Process: POST /login         9 step(s)  src/api/auth.ts:42
+#   Process: main               34 step(s)  src/main.ts:5
+#   …
+```
+
+This gives you a one-query answer to "what does this endpoint actually do?" — the steps along the process are the real call chain, not a dump of the file.
+
+## Full-text search
+
+A SQLite FTS5 virtual table is kept in sync with `nodes` (name + signature + doc_comment). BM25-ranked, no extra deps — bundled with rusqlite.
+
+```bash
+ast-graph search "auth login token"
+# Top 7 matches for: auth login token
+#   1. [     Method] AuthService.validate (src/auth/service.ts:4) — score -2.234
+#   2. [      Route] POST /login          (src/api/auth.ts:21)   — score -2.080
+#   3. [     Method] AuthService.login    (src/auth/service.ts:7) — score -1.986
+#   …
+```
+
+Lower scores rank better (FTS5 BM25 convention). Suffix wildcards are appended automatically, so `auth` also matches `authn`, `authorize`, etc.
+
+## MCP server (Claude Code, Cursor, Codex, Windsurf, OpenCode)
+
+`ast-graph mcp` exposes the graph as a stock MCP server over stdio (JSON-RPC 2.0). Ten tools are registered:
+
+| Tool | Purpose |
+|---|---|
+| `symbol` | Look up a symbol with optional callers/callees/members |
+| `call_chain` | Forward CALLS traversal from a symbol |
+| `blast_radius` | Reverse CALLS traversal (who depends on this) |
+| `hotspots` | Most connected symbols |
+| `dead_code` | Functions with zero incoming CALLS |
+| `search` | BM25 keyword search |
+| `routes` | List extracted HTTP routes |
+| `processes` | List traced execution flows |
+| `stats` | Graph summary |
+| `query` | Backend-native SQL / Cypher escape hatch |
+
+### Setup for Claude Code
+
+```bash
+claude mcp add ast-graph -- ast-graph --db /path/to/.ast-graph/graph.db mcp
+```
+
+### Setup for Cursor
+
+`~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "ast-graph": {
+      "command": "ast-graph",
+      "args": ["--db", "/path/to/.ast-graph/graph.db", "mcp"]
+    }
+  }
+}
+```
+
+The server speaks newline-delimited JSON-RPC by default and also accepts LSP-style `Content-Length`-framed messages.
 
 ## Storage Backends
 
@@ -368,8 +507,11 @@ Methods are stored as `ClassName.methodName` for all languages. Call targets are
 - `this.save()` inside `MyComponent` → stored as `MyComponent.save` → exact match in resolver
 - `self.process()` inside `MyService` → stored as `MyService.process` → exact match
 - `this.dialog.open()` (chained) → falls back to name-only
+- `super().method()` in Python → walks the C3 linearization of the enclosing class and picks the first matching ancestor
 
-This eliminates the false-positive explosion where `this.save()` would previously match every `save()` method in the codebase.
+This eliminates the false-positive explosion where `this.save()` would previously match every `save()` method in the codebase. Every edge also carries a `confidence` score that records *how* the match was made (see "Confidence-tiered edges" above), so consumers can opt out of fuzzy fallbacks.
+
+**Overload safety.** `NodeId` is `hash(file, name, kind, line)` — for callable kinds (`Method`, `Function`, `Constructor`) the signature is also folded in, so two overloads of `Container.add(int)` and `Container.add(string)` produce distinct IDs even if they share a line.
 
 ### SQLite Schema
 
@@ -391,12 +533,22 @@ CREATE TABLE nodes (
 CREATE TABLE edges (
     source_id   TEXT NOT NULL REFERENCES nodes(id),
     target_id   TEXT NOT NULL REFERENCES nodes(id),
-    kind        TEXT NOT NULL       -- CALLS, IMPORTS, EXTENDS, IMPLEMENTS, CONTAINS, REFERENCES
+    kind        TEXT NOT NULL,      -- CALLS, IMPORTS, EXTENDS, IMPLEMENTS, CONTAINS,
+                                    -- REFERENCES, OVERRIDES, HANDLES_ROUTE,
+                                    -- STEP_IN_PROCESS, ENTRY_POINT_OF
+    source_line INTEGER NOT NULL,   -- call site line (or step index for STEP_IN_PROCESS)
+    confidence  REAL NOT NULL       -- 1.0 / 0.95 / 0.9 / 0.5 — see "Confidence-tiered edges"
 );
 
 CREATE TABLE file_hashes (
     file_path   TEXT PRIMARY KEY,
     hash        BLOB NOT NULL       -- SHA-256, used for incremental re-scan
+);
+
+-- FTS5 virtual table — kept in sync with `nodes` via triggers.
+CREATE VIRTUAL TABLE symbol_fts USING fts5(
+    id UNINDEXED, name, signature, doc_comment,
+    tokenize='unicode61'
 );
 ```
 
@@ -424,14 +576,14 @@ FalkorDB stores the same data as a property graph. Every symbol is a `:Symbol` n
 |---|---|---|
 | `id` | string | 16-hex-char stable hash |
 | `name` | string | qualified: `ClassName.methodName` |
-| `kind` | string | `File`, `Class`, `Method`, `Function`, `Interface`, `Package`, … (see [SymbolKind](crates/ast-graph-core/src/symbol.rs)) |
+| `kind` | string | `File`, `Class`, `Method`, `Function`, `Interface`, `Package`, `Route`, `Process`, … (see [SymbolKind](crates/ast-graph-core/src/symbol.rs)) |
 | `file_path` | string | absolute path |
 | `line_start` / `line_end` | int | definition range |
 | `signature` / `doc_comment` | string? | `doc_comment` populated by default from preceding `///`, `/** */`, JSDoc, JavaDoc, or Python docstrings; null when source has no doc or `--no-doc-comments` was used |
 | `visibility` | string | `Public`, `Private`, `Protected`, `Internal` |
 | `language` | string | `rust`, `python`, `javascript`, `typescript`, `csharp`, `java`, `go` |
 
-Relationship types: `CALLS`, `CONTAINS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `OVERRIDES`. Every relationship carries a `line` property — **the source line where the relationship originates** (call site for `CALLS`, not the callee's definition line). `line` is `0` when no meaningful line exists (mostly structural `CONTAINS`).
+Relationship types: `CALLS`, `CONTAINS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `OVERRIDES`, `HANDLES_ROUTE`, `STEP_IN_PROCESS`, `ENTRY_POINT_OF`. Every relationship carries a `line` property — **the source line where the relationship originates** (call site for `CALLS`, step index for `STEP_IN_PROCESS`, not the callee's definition line). `line` is `0` when no meaningful line exists (mostly structural `CONTAINS`). Every relationship also carries a `confidence` property in `[0.5, 1.0]`.
 
 ## Languages Supported
 
@@ -448,13 +600,16 @@ Relationship types: `CALLS`, `CONTAINS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `RE
 
 | Edge | Created by | Notes |
 |---|---|---|
-| `CALLS` | Function/method call expressions | Qualified at extraction: `this.x()` → `ClassName.x` |
+| `CALLS` | Function/method call expressions | Qualified at extraction: `this.x()` → `ClassName.x`. `super().X` in Python uses C3 MRO. |
 | `IMPORTS` | import / using statements | Path and name-based |
 | `EXTENDS` | Class inheritance | Works across files |
 | `IMPLEMENTS` | Interface/trait implementation | Works across files |
 | `CONTAINS` | Parent-child hierarchy | Rust only (via explicit edges); all others use `parent_id` |
 | `REFERENCES` | `new Type()` constructor calls | C# and Java |
 | `OVERRIDES` | Method overrides a parent-class method | Emitted where resolver can determine override relationships |
+| `HANDLES_ROUTE` | Handler symbol → `Route` node | Emitted by the route extractor for Express, NestJS, FastAPI, Spring, ASP.NET, Axum, Actix, chi/echo, etc. |
+| `STEP_IN_PROCESS` | Symbol → `Process` node | Each step in a traced execution flow; `source_line` carries the 1-based step index |
+| `ENTRY_POINT_OF` | Entry-point symbol → `Process` node | Marks the root of a process |
 
 ## Building
 

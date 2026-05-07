@@ -12,6 +12,13 @@ pub enum EdgeKind {
     Implements,
     References,
     OverridesMethod,
+    /// A symbol (controller method, function) handles an HTTP route node.
+    HandlesRoute,
+    /// A symbol participates in a process / execution flow at a given step.
+    /// `source_line` is repurposed as the step index (1-based) on these edges.
+    StepInProcess,
+    /// A symbol is the entry point of a process.
+    EntryPointOf,
 }
 
 impl EdgeKind {
@@ -24,6 +31,9 @@ impl EdgeKind {
             Self::Implements => "IMPLEMENTS",
             Self::References => "REFERENCES",
             Self::OverridesMethod => "OVERRIDES",
+            Self::HandlesRoute => "HANDLES_ROUTE",
+            Self::StepInProcess => "STEP_IN_PROCESS",
+            Self::EntryPointOf => "ENTRY_POINT_OF",
         }
     }
 
@@ -36,6 +46,9 @@ impl EdgeKind {
             "IMPLEMENTS" => Some(Self::Implements),
             "REFERENCES" => Some(Self::References),
             "OVERRIDES" => Some(Self::OverridesMethod),
+            "HANDLES_ROUTE" => Some(Self::HandlesRoute),
+            "STEP_IN_PROCESS" => Some(Self::StepInProcess),
+            "ENTRY_POINT_OF" => Some(Self::EntryPointOf),
             _ => None,
         }
     }
@@ -49,6 +62,9 @@ impl EdgeKind {
         EdgeKind::Implements,
         EdgeKind::References,
         EdgeKind::OverridesMethod,
+        EdgeKind::HandlesRoute,
+        EdgeKind::StepInProcess,
+        EdgeKind::EntryPointOf,
     ];
 }
 
@@ -57,6 +73,19 @@ impl fmt::Display for EdgeKind {
         write!(f, "{}", self.as_neo4j_type())
     }
 }
+
+/// Resolution confidence tier attached to every edge. Higher = more certain
+/// the target is the correct definition.
+///
+/// - `1.0`  — exact / structural (parent→child CONTAINS, by-path import
+///            resolution, signature-disambiguated overload)
+/// - `0.95` — same-file name match (no ambiguity within the file)
+/// - `0.9`  — import-scoped name match (target's file is in caller's import set)
+/// - `0.5`  — global name fallback (last-segment / partial-qualified guess)
+pub const CONFIDENCE_EXACT: f32 = 1.0;
+pub const CONFIDENCE_SAME_FILE: f32 = 0.95;
+pub const CONFIDENCE_IMPORT_SCOPED: f32 = 0.9;
+pub const CONFIDENCE_GLOBAL: f32 = 0.5;
 
 /// A resolved edge between two known nodes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +97,15 @@ pub struct Edge {
     /// for a CALLS edge, the `use` statement for IMPORTS). Zero for edges
     /// that have no meaningful line (e.g. structural CONTAINS edges).
     pub source_line: u32,
+    /// Resolution confidence. See `CONFIDENCE_*` constants.
+    /// Defaults to `CONFIDENCE_EXACT` for edges built before this field
+    /// was tagged (loaded from old DBs, structural edges).
+    #[serde(default = "default_confidence")]
+    pub confidence: f32,
+}
+
+fn default_confidence() -> f32 {
+    CONFIDENCE_EXACT
 }
 
 /// An unresolved edge with a string-based target (pre-resolution).

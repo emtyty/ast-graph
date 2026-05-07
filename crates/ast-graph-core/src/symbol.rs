@@ -10,12 +10,34 @@ pub struct NodeId(pub u64);
 
 impl NodeId {
     pub fn new(file_path: &str, name: &str, kind: SymbolKind, line_start: u32) -> Self {
+        Self::new_with_sig(file_path, name, kind, line_start, None)
+    }
+
+    /// Like `new`, but folds an optional signature into the hash for callable
+    /// kinds (`Method`, `Function`, `Constructor`). Lets two overloads with
+    /// the same name on the same line not collide. For non-callable kinds
+    /// the signature is ignored — IDs stay byte-stable with `new`.
+    pub fn new_with_sig(
+        file_path: &str,
+        name: &str,
+        kind: SymbolKind,
+        line_start: u32,
+        signature: Option<&str>,
+    ) -> Self {
         use std::hash::DefaultHasher;
         let mut hasher = DefaultHasher::new();
         file_path.hash(&mut hasher);
         name.hash(&mut hasher);
         kind.hash(&mut hasher);
         line_start.hash(&mut hasher);
+        if matches!(
+            kind,
+            SymbolKind::Method | SymbolKind::Function | SymbolKind::Constructor
+        ) {
+            if let Some(sig) = signature {
+                sig.hash(&mut hasher);
+            }
+        }
         NodeId(hasher.finish())
     }
 
@@ -59,6 +81,12 @@ pub enum SymbolKind {
     Property,
     Namespace,
     Record,
+    /// HTTP route (Express, FastAPI, Axum, ASP.NET, etc.).
+    /// `name` is conventionally `"<METHOD> <path>"`, e.g. `"GET /users/:id"`.
+    Route,
+    /// Execution flow rooted at an entry point (main, route handler, test).
+    /// Steps are recorded as `STEP_IN_PROCESS` edges to the symbols touched.
+    Process,
 }
 
 impl SymbolKind {
@@ -85,6 +113,8 @@ impl SymbolKind {
             Self::Property => "Property",
             Self::Namespace => "Namespace",
             Self::Record => "Record",
+            Self::Route => "Route",
+            Self::Process => "Process",
         }
     }
 
@@ -111,6 +141,8 @@ impl SymbolKind {
             "Property" => Some(Self::Property),
             "Namespace" => Some(Self::Namespace),
             "Record" => Some(Self::Record),
+            "Route" => Some(Self::Route),
+            "Process" => Some(Self::Process),
             _ => None,
         }
     }

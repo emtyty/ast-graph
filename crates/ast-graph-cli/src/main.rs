@@ -174,6 +174,33 @@ enum Commands {
         #[arg(long)]
         repo: Option<PathBuf>,
     },
+
+    /// Full-text keyword search over names, signatures, doc comments (BM25)
+    Search {
+        /// Query string (one or more keywords)
+        query: String,
+
+        /// Number of results
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+    },
+
+    /// List extracted HTTP routes
+    Routes {
+        /// Number of results
+        #[arg(short, long, default_value = "100")]
+        limit: usize,
+    },
+
+    /// List traced execution flows (processes)
+    Processes {
+        /// Number of results
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+    },
+
+    /// Run as an MCP server over stdio (for Claude Code, Cursor, Codex, etc.)
+    Mcp,
 }
 
 /// Build the chosen backend. For SQLite we resolve the default path against
@@ -288,6 +315,18 @@ fn main() -> Result<()> {
                 &repo_root,
                 callers,
             )?;
+        }
+        Commands::Search { query, limit } => {
+            commands::search::run(&query, limit, storage.as_ref())?;
+        }
+        Commands::Routes { limit } => {
+            commands::routes::run(limit, storage.as_ref())?;
+        }
+        Commands::Processes { limit } => {
+            commands::processes::run(limit, storage.as_ref())?;
+        }
+        Commands::Mcp => {
+            commands::mcp::run(storage.as_ref(), &fallback_root)?;
         }
     }
 

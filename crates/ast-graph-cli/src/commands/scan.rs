@@ -38,6 +38,16 @@ pub fn run(
         graph.metadata.total_nodes, graph.metadata.total_edges
     ));
 
+    pb.set_message("Tracing processes from entry points...");
+    let (proc_count, step_count) =
+        ast_graph_resolve::processes::trace_processes(&mut graph);
+    if proc_count > 0 {
+        info!(
+            "Traced {} process(es) with {} step edges",
+            proc_count, step_count
+        );
+    }
+
     pb.set_message(format!("Saving to {}...", storage.backend_name()));
     let (node_count, edge_count) = storage.save_graph(&graph)?;
 
