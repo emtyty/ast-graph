@@ -532,40 +532,45 @@ impl GraphStorage for FalkorStorage {
             });
         }
 
-        // Load all edges (all relationship types).
-        let rows = self.run_cypher(
-            "MATCH (a:Symbol)-[r]->(b:Symbol) RETURN a.id, b.id, type(r), r.line, r.confidence",
-            &HashMap::new(),
-        )?;
-        for row in rows {
-            if row.len() < 4 {
-                continue;
+        // Load edges per relationship type. A single MATCH over all rel-types
+        // exceeds the client's socket read window on large graphs and drops the
+        // connection before the server's response arrives — same failure mode
+        // fixed in `get_stats` and `save_graph` verify.
+        for kind in EdgeKind::ALL {
+            let q = format!(
+                "MATCH (a:Symbol)-[r:{}]->(b:Symbol) RETURN a.id, b.id, r.line, r.confidence",
+                kind.as_neo4j_type()
+            );
+            let rows = match self.run_cypher(&q, &HashMap::new()) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            for row in rows {
+                if row.len() < 3 {
+                    continue;
+                }
+                let src = match fv_get_string(&row[0]).and_then(|s| NodeId::from_hex(&s)) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let tgt = match fv_get_string(&row[1]).and_then(|s| NodeId::from_hex(&s)) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let line = fv_get_i64(&row[2]) as u32;
+                let confidence = if row.len() >= 4 {
+                    fv_get_f64(&row[3]).unwrap_or(1.0) as f32
+                } else {
+                    1.0
+                };
+                graph.add_edge(Edge {
+                    source: src,
+                    target: tgt,
+                    kind: *kind,
+                    source_line: line,
+                    confidence,
+                });
             }
-            let src = match fv_get_string(&row[0]).and_then(|s| NodeId::from_hex(&s)) {
-                Some(v) => v,
-                None => continue,
-            };
-            let tgt = match fv_get_string(&row[1]).and_then(|s| NodeId::from_hex(&s)) {
-                Some(v) => v,
-                None => continue,
-            };
-            let kind = match fv_get_string(&row[2]).and_then(|s| EdgeKind::from_neo4j_type(&s)) {
-                Some(k) => k,
-                None => continue,
-            };
-            let line = fv_get_i64(&row[3]) as u32;
-            let confidence = if row.len() >= 5 {
-                fv_get_f64(&row[4]).unwrap_or(1.0) as f32
-            } else {
-                1.0
-            };
-            graph.add_edge(Edge {
-                source: src,
-                target: tgt,
-                kind,
-                source_line: line,
-                confidence,
-            });
         }
 
         // Load file hashes.
