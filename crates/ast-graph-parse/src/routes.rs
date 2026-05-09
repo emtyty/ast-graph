@@ -48,6 +48,13 @@ struct RoutePatterns {
     /// Symfony PHP-attribute syntax: `#[Route('/path', methods: ['GET'])]`.
     /// Captures path; verb is parsed separately in the PHP arm.
     php_symfony_attr: Regex,
+    /// `fetch('/api/x', { method: 'POST' })` — verb defaults to GET.
+    /// Captures path only; method (if specified) is parsed by a follow-up scan.
+    fetch_call: Regex,
+    /// `axios.get|post|put|delete|patch('/api/x', ...)`.
+    fetch_axios: Regex,
+    /// `useSWR('/api/x')` — single-arg, GET only.
+    fetch_swr: Regex,
 }
 
 fn patterns() -> &'static RoutePatterns {
@@ -103,6 +110,21 @@ fn patterns() -> &'static RoutePatterns {
         .unwrap(),
         php_symfony_attr: Regex::new(
             r#"#\s*\[\s*Route\s*\(\s*[`'"]([^`'"]+)[`'"](?:[^\]]*methods\s*:\s*\[\s*[`'"]([A-Za-z]+)[`'"])?"#,
+        )
+        .unwrap(),
+        // Capture path then optionally an inline `method: 'POST'`. The
+        // `[^()]` window prevents crossing into a sibling `fetch(...)` call —
+        // method must appear inside the current call's argument list.
+        fetch_call: Regex::new(
+            r#"\bfetch\s*\(\s*[`'"]([^`'"]+)[`'"](?:[^()]{0,200}?method\s*:\s*[`'"]([A-Za-z]+)[`'"])?"#,
+        )
+        .unwrap(),
+        fetch_axios: Regex::new(
+            r#"\baxios\s*\.\s*(get|post|put|delete|patch|head|options)\s*\(\s*[`'"]([^`'"]+)[`'"]"#,
+        )
+        .unwrap(),
+        fetch_swr: Regex::new(
+            r#"\buseSWR\s*\(\s*[`'"]([^`'"]+)[`'"]"#,
         )
         .unwrap(),
     })
@@ -192,10 +214,38 @@ pub fn extract_routes(
 
     let mut emit_fn = emit;
 
+    // FETCHES detection (JS/TS only) — collected as `(verb, path, byte_offset)`
+    // tuples so the borrow on `extra_raw_edges` happens *after* the route-emit
+    // closure is dropped, avoiding a double-mut-borrow conflict with `emit_fn`.
+    let mut fetch_hits: Vec<(String, String, usize)> = Vec::new();
+
     match language {
         Language::JavaScript | Language::TypeScript => {
             run_pattern(&p.express, text, 1, 2, &mut emit_fn);
             run_pattern(&p.nest_decorator, text, 1, 2, &mut emit_fn);
+            for m in p.fetch_call.captures_iter(text) {
+                if let Some(path) = m.get(1) {
+                    let verb = m
+                        .get(2)
+                        .map(|v| v.as_str().to_string())
+                        .unwrap_or_else(|| "GET".to_string());
+                    fetch_hits.push((verb, path.as_str().to_string(), path.start()));
+                }
+            }
+            for m in p.fetch_axios.captures_iter(text) {
+                if let (Some(verb), Some(path)) = (m.get(1), m.get(2)) {
+                    fetch_hits.push((
+                        verb.as_str().to_string(),
+                        path.as_str().to_string(),
+                        path.start(),
+                    ));
+                }
+            }
+            for m in p.fetch_swr.captures_iter(text) {
+                if let Some(path) = m.get(1) {
+                    fetch_hits.push(("GET".to_string(), path.as_str().to_string(), path.start()));
+                }
+            }
         }
         Language::Python => {
             run_pattern(&p.python_decorator, text, 1, 2, &mut emit_fn);
@@ -246,6 +296,39 @@ pub fn extract_routes(
                     emit_fn("ANY", path.as_str(), path.start());
                 }
             }
+        }
+    }
+
+    // Drop the route-emit closure so we can re-borrow `extra_raw_edges`.
+    drop(emit_fn);
+
+    // Flush FETCHES — emit one RawEdge per fetch site, attributed to its
+    // enclosing handler symbol (innermost containing Function/Method).
+    for (verb, path, byte_offset) in fetch_hits {
+        let path_trimmed = path.trim();
+        if path_trimmed.is_empty() {
+            continue;
+        }
+        let line = byte_to_line(text, byte_offset);
+        let target_name = format!("{} {}", verb.to_uppercase(), path_trimmed);
+        let handler = existing_symbols
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.kind,
+                    SymbolKind::Function | SymbolKind::Method | SymbolKind::Constructor
+                ) && s.line_range.0 <= line
+                    && line <= s.line_range.1
+            })
+            .min_by_key(|s| s.line_range.1.saturating_sub(s.line_range.0));
+        if let Some(handler) = handler {
+            extra_raw_edges.push(RawEdge {
+                source: handler.id,
+                kind: EdgeKind::Fetches,
+                target_name,
+                target_module: None,
+                source_line: line,
+            });
         }
     }
 }

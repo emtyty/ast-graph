@@ -96,6 +96,18 @@ pub fn resolve_edges(graph: &mut CodeGraph, root: &std::path::Path) {
         .iter()
         .map(|(id, n)| (*id, n.file_path.to_string_lossy().to_string()))
         .collect();
+    // Route-by-name index for FETCHES resolution. Keys are exactly the
+    // `<METHOD> <path>` names that route extractors emit, so a fetch RawEdge
+    // with target_name "GET /api/users" maps directly to the matching Route node.
+    let route_index: FxHashMap<String, Vec<NodeId>> = {
+        let mut idx: FxHashMap<String, Vec<NodeId>> = FxHashMap::default();
+        for (id, node) in &graph.nodes {
+            if node.kind == SymbolKind::Route {
+                idx.entry(node.name.clone()).or_default().push(*id);
+            }
+        }
+        idx
+    };
 
     let raw_edges = std::mem::take(&mut graph.raw_edges);
     let mut resolved = 0;
@@ -300,6 +312,48 @@ pub fn resolve_edges(graph: &mut CodeGraph, root: &std::path::Path) {
                 }
                 unresolved += 1;
             }
+            EdgeKind::Fetches => {
+                // Fetch detector encodes "<METHOD> <path>" as target_name.
+                // Resolve to a Route node by exact-name match. If the verb is
+                // recorded as ANY (e.g. Symfony @Route without methods), also
+                // match any verb on the same path. Drop on miss — a dangling
+                // FETCHES edge is just noise.
+                if let Some(targets) = route_index.get(&raw.target_name) {
+                    for target in targets {
+                        graph.add_edge(Edge {
+                            source: raw.source,
+                            target: *target,
+                            kind: EdgeKind::Fetches,
+                            source_line: raw.source_line,
+                            confidence: CONFIDENCE_EXACT,
+                        });
+                        resolved += 1;
+                    }
+                } else if let Some(path) = raw.target_name.split_once(' ').map(|(_, p)| p) {
+                    // Verb mismatch fallback: try matching any verb on the same path.
+                    let mut matched = false;
+                    for (name, ids) in &route_index {
+                        if name.split_once(' ').map(|(_, p)| p) == Some(path) {
+                            for target in ids {
+                                graph.add_edge(Edge {
+                                    source: raw.source,
+                                    target: *target,
+                                    kind: EdgeKind::Fetches,
+                                    source_line: raw.source_line,
+                                    confidence: CONFIDENCE_GLOBAL,
+                                });
+                                resolved += 1;
+                                matched = true;
+                            }
+                        }
+                    }
+                    if !matched {
+                        unresolved += 1;
+                    }
+                } else {
+                    unresolved += 1;
+                }
+            }
             _ => {
                 unresolved += 1;
             }
@@ -385,6 +439,52 @@ pub fn resolve_edges(graph: &mut CodeGraph, root: &std::path::Path) {
 
     if super_resolved > 0 {
         info!("Resolved {} Python super().X calls via C3 MRO", super_resolved);
+    }
+
+    // Pass 3: synthesize CALLS edges across the HTTP boundary so blast-radius
+    // and call-chain traverse fetch→handler as a single reverse walk. For
+    // every FETCHES edge `caller → Route`, find each handler that handles
+    // that Route (HANDLES_ROUTE: handler → Route) and emit `caller -[CALLS]→ handler`.
+    let mut synthesized_calls = 0usize;
+    let mut to_add: Vec<Edge> = Vec::new();
+    {
+        // Build handler index: route_id -> [handler_id]
+        let mut handlers_of: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
+        for (src, edges) in &graph.adjacency {
+            for e in edges {
+                if e.kind == EdgeKind::HandlesRoute {
+                    handlers_of.entry(e.target).or_default().push(*src);
+                }
+            }
+        }
+        for (src, edges) in &graph.adjacency {
+            for e in edges {
+                if e.kind != EdgeKind::Fetches {
+                    continue;
+                }
+                if let Some(handlers) = handlers_of.get(&e.target) {
+                    for &h in handlers {
+                        to_add.push(Edge {
+                            source: *src,
+                            target: h,
+                            kind: EdgeKind::Calls,
+                            source_line: e.source_line,
+                            confidence: e.confidence,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    for edge in to_add {
+        graph.add_edge(edge);
+        synthesized_calls += 1;
+    }
+    if synthesized_calls > 0 {
+        info!(
+            "Synthesized {} cross-HTTP CALLS edges from FETCHES + HANDLES_ROUTE",
+            synthesized_calls
+        );
     }
 
     graph.refresh_metadata();

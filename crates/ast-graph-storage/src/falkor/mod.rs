@@ -740,7 +740,7 @@ impl GraphStorage for FalkorStorage {
         let mut params = HashMap::new();
         params.insert("id".to_string(), cypher_escape_string(node_id));
         let cypher = format!(
-            "MATCH path = (start:Symbol {{id: $id}})-[r:CALLS*1..{depth}]->(target:Symbol) \
+            "MATCH path = (start:Symbol {{id: $id}})-[r:CALLS|FETCHES|HANDLES_ROUTE*1..{depth}]->(target:Symbol) \
              RETURN target.id, target.name, target.kind, length(path) AS depth, \
                     [n IN nodes(path) | n.name] AS node_path, \
                     [rel IN relationships(path) | rel.line] AS call_lines \
@@ -777,9 +777,11 @@ impl GraphStorage for FalkorStorage {
         let depth = max_depth.clamp(1, 20);
         let mut params = HashMap::new();
         params.insert("id".to_string(), cypher_escape_string(node_id));
-        // Upstream callers: follow CALLS edges in reverse direction.
+        // Upstream callers: follow CALLS, FETCHES, and HANDLES_ROUTE edges in reverse.
+        // Crossing FETCHES + HANDLES_ROUTE lets blast-radius surface client-side
+        // components that reach a server method through an HTTP route.
         let cypher = format!(
-            "MATCH path = (caller:Symbol)-[r:CALLS*1..{depth}]->(target:Symbol {{id: $id}}) \
+            "MATCH path = (caller:Symbol)-[r:CALLS|FETCHES|HANDLES_ROUTE*1..{depth}]->(target:Symbol {{id: $id}}) \
              RETURN caller.id, caller.name, caller.kind, caller.file_path, caller.line_start, \
                     length(path) AS depth, \
                     [n IN nodes(path) | n.name] AS node_path, \

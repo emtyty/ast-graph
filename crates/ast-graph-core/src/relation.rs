@@ -19,6 +19,11 @@ pub enum EdgeKind {
     StepInProcess,
     /// A symbol is the entry point of a process.
     EntryPointOf,
+    /// A symbol calls an HTTP endpoint by URL — connects client-side
+    /// `fetch('/api/x')` / `axios.get('/api/x')` / `useSWR('/api/x')` to
+    /// a `Route` node with matching `<METHOD> <path>` name. Lets `blast-radius`
+    /// and `call-chain` cross the HTTP boundary in a full-stack repo.
+    Fetches,
 }
 
 impl EdgeKind {
@@ -34,6 +39,7 @@ impl EdgeKind {
             Self::HandlesRoute => "HANDLES_ROUTE",
             Self::StepInProcess => "STEP_IN_PROCESS",
             Self::EntryPointOf => "ENTRY_POINT_OF",
+            Self::Fetches => "FETCHES",
         }
     }
 
@@ -49,6 +55,7 @@ impl EdgeKind {
             "HANDLES_ROUTE" => Some(Self::HandlesRoute),
             "STEP_IN_PROCESS" => Some(Self::StepInProcess),
             "ENTRY_POINT_OF" => Some(Self::EntryPointOf),
+            "FETCHES" => Some(Self::Fetches),
             _ => None,
         }
     }
@@ -65,6 +72,7 @@ impl EdgeKind {
         EdgeKind::HandlesRoute,
         EdgeKind::StepInProcess,
         EdgeKind::EntryPointOf,
+        EdgeKind::Fetches,
     ];
 }
 

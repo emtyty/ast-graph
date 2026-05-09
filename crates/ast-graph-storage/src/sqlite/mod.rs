@@ -351,6 +351,8 @@ impl GraphStorage for SqliteStorage {
 
     fn call_chain(&self, node_id: &str, max_depth: i32) -> Result<Vec<serde_json::Value>> {
         let conn = self.conn.lock().unwrap();
+        // Traverses both CALLS and FETCHES so the chain crosses HTTP boundaries
+        // (a frontend `fetch('/api/users')` reaches the server's route handler).
         let mut stmt = conn.prepare(
             "
             WITH RECURSIVE call_tree(id, name, kind, depth, path, call_line) AS (
@@ -363,7 +365,7 @@ impl GraphStorage for SqliteStorage {
                        ct.path || ' -> ' || n2.name,
                        e.source_line
                 FROM call_tree ct
-                JOIN edges e ON e.source_id = ct.id AND e.kind = 'CALLS'
+                JOIN edges e ON e.source_id = ct.id AND e.kind IN ('CALLS', 'FETCHES', 'HANDLES_ROUTE')
                 JOIN nodes n2 ON n2.id = e.target_id
                 WHERE ct.depth < ?2
             )
@@ -392,6 +394,9 @@ impl GraphStorage for SqliteStorage {
 
     fn reverse_call_chain(&self, node_id: &str, max_depth: i32) -> Result<Vec<serde_json::Value>> {
         let conn = self.conn.lock().unwrap();
+        // Walks CALLS, FETCHES, and HANDLES_ROUTE in reverse so blast-radius on
+        // a server method surfaces both its server-internal callers AND the
+        // client components that reach it via fetch/axios/useSWR.
         let mut stmt = conn.prepare(
             "
             WITH RECURSIVE reverse_tree(id, name, kind, file_path, line_start, depth, path, call_line) AS (
@@ -404,7 +409,7 @@ impl GraphStorage for SqliteStorage {
                        n2.name || ' -> ' || rt.path,
                        e.source_line
                 FROM reverse_tree rt
-                JOIN edges e ON e.target_id = rt.id AND e.kind = 'CALLS'
+                JOIN edges e ON e.target_id = rt.id AND e.kind IN ('CALLS', 'FETCHES', 'HANDLES_ROUTE')
                 JOIN nodes n2 ON n2.id = e.source_id
                 WHERE rt.depth < ?2
             )
