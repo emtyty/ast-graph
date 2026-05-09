@@ -2,6 +2,7 @@
 name = "ast-graph-cli"
 version.workspace = true
 edition.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "ast-graph"
