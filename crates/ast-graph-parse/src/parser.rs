@@ -65,6 +65,10 @@ pub fn parse_project_with_options(root: &Path, options: &ParseOptions) -> Result
         }
     }
 
+    // File-based routing pre-pass — emits Route nodes for Next.js App/Pages
+    // Router, Remix, Nuxt, SvelteKit conventions before resolution runs.
+    crate::routes_filebased::detect_filebased_routes(&mut graph);
+
     graph.refresh_metadata();
     info!(
         "Graph built: {} nodes, {} raw edges, {} files, languages: {:?}",

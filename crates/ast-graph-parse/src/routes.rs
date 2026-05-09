@@ -55,6 +55,13 @@ struct RoutePatterns {
     fetch_axios: Regex,
     /// `useSWR('/api/x')` — single-arg, GET only.
     fetch_swr: Regex,
+    /// React Router JSX: `<Route path="/users" element={<Users/>} />`.
+    rrouter_jsx: Regex,
+    /// Object-form router config (React Router v6 createBrowserRouter, TanStack
+    /// Router, Vue Router): `{ path: "/x", element: ... }`. Matches when the
+    /// path key is followed within a small window by `element|component|loader|Component`
+    /// — keeps it from matching arbitrary `path: "..."` strings.
+    rrouter_object: Regex,
 }
 
 fn patterns() -> &'static RoutePatterns {
@@ -125,6 +132,14 @@ fn patterns() -> &'static RoutePatterns {
         .unwrap(),
         fetch_swr: Regex::new(
             r#"\buseSWR\s*\(\s*[`'"]([^`'"]+)[`'"]"#,
+        )
+        .unwrap(),
+        rrouter_jsx: Regex::new(
+            r#"<Route\s+(?:[^>]*?\s)?path\s*=\s*[`'"]([^`'"]+)[`'"]"#,
+        )
+        .unwrap(),
+        rrouter_object: Regex::new(
+            r#"\bpath\s*:\s*[`'"]([^`'"]+)[`'"][\s\S]{0,200}?(?:element|component|Component|loader|action)\s*:"#,
         )
         .unwrap(),
     })
@@ -223,6 +238,18 @@ pub fn extract_routes(
         Language::JavaScript | Language::TypeScript => {
             run_pattern(&p.express, text, 1, 2, &mut emit_fn);
             run_pattern(&p.nest_decorator, text, 1, 2, &mut emit_fn);
+            // Client-side routing — React Router JSX and object-form configs.
+            // Verb defaults to GET (these are page navigations, not API calls).
+            for m in p.rrouter_jsx.captures_iter(text) {
+                if let Some(path) = m.get(1) {
+                    emit_fn("GET", path.as_str(), path.start());
+                }
+            }
+            for m in p.rrouter_object.captures_iter(text) {
+                if let Some(path) = m.get(1) {
+                    emit_fn("GET", path.as_str(), path.start());
+                }
+            }
             for m in p.fetch_call.captures_iter(text) {
                 if let Some(path) = m.get(1) {
                     let verb = m
