@@ -21,8 +21,11 @@ jobs:
           echo "version=v$BRANCH" >> "$GITHUB_OUTPUT"
 
       - name: Create and push tag
+        env:
+          GH_PAT: ${{ secrets.PAT_TOKEN }}
         run: |
           TAG=${{ steps.version.outputs.version }}
+          git remote set-url origin https://x-access-token:$GH_PAT@github.com/${{ github.repository }}
           if git ls-remote --tags origin | grep -q "refs/tags/$TAG$"; then
             git push origin :refs/tags/$TAG
             git tag -d $TAG 2>/dev/null || true
