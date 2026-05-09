@@ -3,10 +3,10 @@
 //! from the enclosing handler symbol to each route.
 //!
 //! Approach: regex-scan the source for known framework patterns (Express,
-//! NestJS, FastAPI/Flask, ASP.NET, Spring, Axum/Actix, chi/echo). For each
-//! match we identify the enclosing function/method by line containment over
-//! already-extracted symbols. Pragmatic — covers the common cases without
-//! per-language tree-sitter walks.
+//! NestJS, FastAPI/Flask, ASP.NET, Spring, Axum/Actix, chi/echo, Laravel,
+//! Slim, Symfony). For each match we identify the enclosing function/method
+//! by line containment over already-extracted symbols. Pragmatic — covers
+//! the common cases without per-language tree-sitter walks.
 
 use ast_graph_core::*;
 use regex::Regex;
@@ -41,6 +41,13 @@ struct RoutePatterns {
     go_method: Regex,
     /// Go net/http: `r.HandleFunc("/path", handler)`. Verb unknown → "ANY".
     go_handlefunc: Regex,
+    /// Laravel: `Route::get|post|put|delete|patch|any|match('/path', ...)`.
+    php_laravel: Regex,
+    /// Slim / Lumen: `$app->get|post(...)('/path', ...)`. PHP uses `->` not `.`.
+    php_slim: Regex,
+    /// Symfony PHP-attribute syntax: `#[Route('/path', methods: ['GET'])]`.
+    /// Captures path; verb is parsed separately in the PHP arm.
+    php_symfony_attr: Regex,
 }
 
 fn patterns() -> &'static RoutePatterns {
@@ -84,6 +91,18 @@ fn patterns() -> &'static RoutePatterns {
         .unwrap(),
         go_handlefunc: Regex::new(
             r#"\b\w+\s*\.\s*HandleFunc\s*\(\s*[`'"]([^`'"]+)[`'"]"#,
+        )
+        .unwrap(),
+        php_laravel: Regex::new(
+            r#"\bRoute::\s*(get|post|put|delete|patch|options|head|any|match)\s*\(\s*[`'"]([^`'"]+)[`'"]"#,
+        )
+        .unwrap(),
+        php_slim: Regex::new(
+            r#"\$\w+\s*->\s*(get|post|put|delete|patch|options|head|any|map)\s*\(\s*[`'"]([^`'"]+)[`'"]"#,
+        )
+        .unwrap(),
+        php_symfony_attr: Regex::new(
+            r#"#\s*\[\s*Route\s*\(\s*[`'"]([^`'"]+)[`'"](?:[^\]]*methods\s*:\s*\[\s*[`'"]([A-Za-z]+)[`'"])?"#,
         )
         .unwrap(),
     })
@@ -201,6 +220,24 @@ pub fn extract_routes(
                 }
             }
             run_pattern(&p.actix_attr, text, 1, 2, &mut emit_fn);
+        }
+        Language::Swift => {
+            // Vapor is the main Swift web framework, but adoption is niche.
+            // Skip route extraction for Swift until a real codebase shows up.
+        }
+        Language::Php => {
+            run_pattern(&p.php_laravel, text, 1, 2, &mut emit_fn);
+            run_pattern(&p.php_slim, text, 1, 2, &mut emit_fn);
+            // Symfony attributes: path is capture 1, optional verb is capture 2.
+            for m in p.php_symfony_attr.captures_iter(text) {
+                if let Some(path) = m.get(1) {
+                    let verb = m
+                        .get(2)
+                        .map(|v| v.as_str().to_string())
+                        .unwrap_or_else(|| "ANY".to_string());
+                    emit_fn(&verb, path.as_str(), path.start());
+                }
+            }
         }
         Language::Go => {
             run_pattern(&p.go_method, text, 1, 2, &mut emit_fn);

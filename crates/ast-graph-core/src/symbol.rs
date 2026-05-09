@@ -182,6 +182,8 @@ pub enum Language {
     CSharp,
     Java,
     Go,
+    Swift,
+    Php,
 }
 
 impl Language {
@@ -194,6 +196,8 @@ impl Language {
             "cs" => Some(Self::CSharp),
             "java" => Some(Self::Java),
             "go" => Some(Self::Go),
+            "swift" => Some(Self::Swift),
+            "php" | "phtml" => Some(Self::Php),
             _ => None,
         }
     }
@@ -207,6 +211,8 @@ impl Language {
             Self::CSharp => "csharp",
             Self::Java => "java",
             Self::Go => "go",
+            Self::Swift => "swift",
+            Self::Php => "php",
         }
     }
 
@@ -219,6 +225,8 @@ impl Language {
             "csharp" => Some(Self::CSharp),
             "java" => Some(Self::Java),
             "go" => Some(Self::Go),
+            "swift" => Some(Self::Swift),
+            "php" => Some(Self::Php),
             _ => None,
         }
     }

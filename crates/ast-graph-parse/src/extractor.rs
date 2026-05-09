@@ -45,6 +45,21 @@ pub fn find_child_by_kind<'a>(
     None
 }
 
+/// Helper to find the first child whose `kind()` is in the given list.
+/// Useful when multiple grammar versions or sibling node kinds need to match.
+pub fn find_child_by_any_kind<'a>(
+    node: &'a tree_sitter::Node<'a>,
+    kinds: &[&str],
+) -> Option<tree_sitter::Node<'a>> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if kinds.contains(&child.kind()) {
+            return Some(child);
+        }
+    }
+    None
+}
+
 /// Helper to find a named child by field name.
 pub fn child_by_field<'a>(
     node: &'a tree_sitter::Node<'a>,
