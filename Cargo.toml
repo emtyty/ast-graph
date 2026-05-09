@@ -60,6 +60,10 @@ indicatif = "0.17"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
 [workspace.metadata.dist]
 cargo-dist-version = "0.31.0"
 ci = "github"
