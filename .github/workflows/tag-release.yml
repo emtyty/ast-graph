@@ -1,0 +1,31 @@
+name: Tag Release Branch
+
+on:
+  push:
+    branches:
+      - 'release/**'
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from branch name
+        id: version
+        run: |
+          BRANCH="${GITHUB_REF#refs/heads/release/}"
+          echo "version=v$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        run: |
+          TAG=${{ steps.version.outputs.version }}
+          if git ls-remote --tags origin | grep -q "refs/tags/$TAG$"; then
+            git push origin :refs/tags/$TAG
+            git tag -d $TAG 2>/dev/null || true
+          fi
+          git tag $TAG
+          git push origin $TAG
