@@ -12,7 +12,7 @@ ast-graph hotspots
 
 ## Features
 
-- **Multi-language** — Rust, Python, JavaScript/TypeScript, C# (.NET), Java, Go
+- **Multi-language** — Rust, Python, JavaScript/TypeScript, C# (.NET), Java, Go, Swift, PHP
 - **AST compression** — strips full syntax trees down to structural nodes only (~90% reduction)
 - **Class-context-aware resolution** — `this.method()` / `self.method()` calls resolve to the correct class, not every method with that name across the codebase
 - **Cross-file resolution** — resolves function calls, imports, type references, inheritance across files
@@ -22,7 +22,9 @@ ast-graph hotspots
 - **Symbol lookup** — find any symbol by partial name, instantly see callers, callees, members
 - **Pluggable backends** — SQLite for single-machine use, FalkorDB for team/server use with Cypher
 - **Git-aware analysis** — `blast-radius`, `changed-symbols`, and `dead-code` bring PR review and refactor planning onto the graph
-- **HTTP route extraction** — `Route` nodes for Express, NestJS, FastAPI/Flask, Spring Boot, ASP.NET, Axum, Actix, chi/echo/gin, net/http
+- **HTTP route extraction** — `Route` nodes for Express, NestJS, FastAPI/Flask, Spring Boot, ASP.NET, Axum, Actix, chi/echo/gin, net/http, Laravel/Slim/Symfony — plus client-side / page routes for React Router, Next.js (App + Pages + `route.ts`), Remix, Nuxt, SvelteKit, TanStack Router, Vue Router
+- **Cross-HTTP CALLS** — client-side `fetch('/api/x')` / `axios.get(...)` / `useSWR(...)` resolves to the matching server `Route`, then a synthesized `CALLS` edge crosses the boundary so `blast-radius` and `call-chain` walk the full frontend→backend chain in one query
+- **TS/JS path aliases** — `tsconfig.json` / `jsconfig.json` `baseUrl` + `paths` are honored when resolving imports, so `@components/Button` lands on the real source file instead of falling through to name-only fallback
 - **Process tracing** — entry-point detection (`main`, route handlers, `test_*` functions) plus a depth-bounded BFS along CALLS edges, surfaced as `Process` nodes with `STEP_IN_PROCESS` edges
 - **Full-text search** — bundled SQLite FTS5 over name + signature + doc comment, BM25-ranked, no extra deps
 - **MCP server** — `ast-graph mcp` speaks JSON-RPC over stdio so Claude Code, Cursor, Codex, Windsurf, and OpenCode can call ast-graph natively
@@ -273,12 +275,13 @@ Frameworks recognized out of the box:
 
 | Language | Frameworks |
 |---|---|
-| TypeScript / JavaScript | Express, Fastify, Koa, Hono, Bun, NestJS decorators |
+| TypeScript / JavaScript | **Server**: Express, Fastify, Koa, Hono, Bun, NestJS decorators. **Client / file-based**: React Router (`<Route path="..." />`), TanStack Router, Vue Router, Next.js App Router (`app/**/page.tsx`, `app/**/route.ts`), Next.js Pages Router (`pages/**`), Remix (`routes/**`, `$param` → `:param`), Nuxt 3 (`pages/**/*.vue`), SvelteKit (`routes/**/+page.svelte`) |
 | Python | FastAPI / Flask `@app.<verb>(...)`, `@app.route(...)` |
 | Java | Spring Boot `@GetMapping`, `@PostMapping`, `@RequestMapping`, … |
 | C# | ASP.NET `[HttpGet("/x")]`, `[HttpPost(...)]`, `[Route("/x")]` |
 | Rust | Axum `Router::new().route(...)`, Actix `#[get("/x")]` |
 | Go | chi/echo/gin `r.Get(...)`, `r.HandleFunc(...)` |
+| PHP | Laravel `Route::get('/x', ...)`, Slim / Lumen `$app->get(...)`, Symfony attributes `#[Route('/x', methods: ['GET'])]` |
 
 ```bash
 ast-graph routes
@@ -308,6 +311,30 @@ ast-graph processes --limit 10
 ```
 
 This gives you a one-query answer to "what does this endpoint actually do?" — the steps along the process are the real call chain, not a dump of the file.
+
+### `FETCHES` — client-side HTTP calls → server `Route`
+
+In a full-stack repo, `fetch('/api/users')` on the frontend is supposed to hit the `GET /api/users` handler on the backend. Without `FETCHES`, the graph treats them as two unrelated symbols. With `FETCHES`, they're one chain.
+
+Detected (JS/TS today):
+
+```js
+fetch('/api/users')                       // → GET  (default)
+fetch('/api/users', { method: 'POST' })   // → POST
+axios.get('/api/users')                   // → GET
+axios.post('/api/users', body)            // → POST
+useSWR('/api/users')                      // → GET
+```
+
+Each fetch site becomes a `FETCHES` edge to the `Route` node whose name matches `"<METHOD> <path>"`. Exact path+verb match lands at confidence `1.0`; path-only match (verb mismatch) at `0.5`.
+
+A post-pass synthesizes an extra `CALLS` edge across each triangle `caller -[FETCHES]-> Route <-[HANDLES_ROUTE]- handler`, so the existing `blast-radius` and `call-chain` reverse-walk cross the HTTP boundary without any query changes:
+
+```bash
+# "if I change the GET /api/users handler, what frontend code depends on it?"
+ast-graph blast-radius "getUsers" --depth 4
+# Surfaces every React component that calls fetch('/api/users') — across the network boundary.
+```
 
 ## Full-text search
 
@@ -534,7 +561,7 @@ CREATE TABLE edges (
     source_id   TEXT NOT NULL REFERENCES nodes(id),
     target_id   TEXT NOT NULL REFERENCES nodes(id),
     kind        TEXT NOT NULL,      -- CALLS, IMPORTS, EXTENDS, IMPLEMENTS, CONTAINS,
-                                    -- REFERENCES, OVERRIDES, HANDLES_ROUTE,
+                                    -- REFERENCES, OVERRIDES, HANDLES_ROUTE, FETCHES,
                                     -- STEP_IN_PROCESS, ENTRY_POINT_OF
     source_line INTEGER NOT NULL,   -- call site line (or step index for STEP_IN_PROCESS)
     confidence  REAL NOT NULL       -- 1.0 / 0.95 / 0.9 / 0.5 — see "Confidence-tiered edges"
@@ -581,9 +608,9 @@ FalkorDB stores the same data as a property graph. Every symbol is a `:Symbol` n
 | `line_start` / `line_end` | int | definition range |
 | `signature` / `doc_comment` | string? | `doc_comment` populated by default from preceding `///`, `/** */`, JSDoc, JavaDoc, or Python docstrings; null when source has no doc or `--no-doc-comments` was used |
 | `visibility` | string | `Public`, `Private`, `Protected`, `Internal` |
-| `language` | string | `rust`, `python`, `javascript`, `typescript`, `csharp`, `java`, `go` |
+| `language` | string | `rust`, `python`, `javascript`, `typescript`, `csharp`, `java`, `go`, `swift`, `php` |
 
-Relationship types: `CALLS`, `CONTAINS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `OVERRIDES`, `HANDLES_ROUTE`, `STEP_IN_PROCESS`, `ENTRY_POINT_OF`. Every relationship carries a `line` property — **the source line where the relationship originates** (call site for `CALLS`, step index for `STEP_IN_PROCESS`, not the callee's definition line). `line` is `0` when no meaningful line exists (mostly structural `CONTAINS`). Every relationship also carries a `confidence` property in `[0.5, 1.0]`.
+Relationship types: `CALLS`, `CONTAINS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `OVERRIDES`, `HANDLES_ROUTE`, `FETCHES`, `STEP_IN_PROCESS`, `ENTRY_POINT_OF`. Every relationship carries a `line` property — **the source line where the relationship originates** (call site for `CALLS`, step index for `STEP_IN_PROCESS`, not the callee's definition line). `line` is `0` when no meaningful line exists (mostly structural `CONTAINS`). Every relationship also carries a `confidence` property in `[0.5, 1.0]`.
 
 ## Languages Supported
 
@@ -591,10 +618,12 @@ Relationship types: `CALLS`, `CONTAINS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `RE
 |---|---|---|
 | **Rust** | `.rs` | fn, struct, enum, trait, impl, use, mod, const, static |
 | **Python** | `.py` | def, class, import, from...import |
-| **JavaScript/TypeScript** | `.js/.ts/.tsx` | function, class, arrow fn, import, interface, enum, type alias |
+| **JavaScript/TypeScript** | `.js/.ts/.tsx` | function, class, arrow fn, import (with `tsconfig.json` path-alias resolution), interface, enum, type alias |
 | **C# (.NET)** | `.cs` | class, method, constructor, interface, using, namespace, record, enum |
 | **Java** | `.java` | class, interface, enum, record, method, constructor, field, import, package, extends, implements |
 | **Go** | `.go` | package, func, method (pointer + value receivers), struct, interface, type alias, import, const, field |
+| **Swift** | `.swift` | class, struct, actor, extension, protocol, enum, func, init, deinit, property, import; `self.method()` qualification; overload-safe NodeIds |
+| **PHP** | `.php`, `.phtml` | namespace, class, interface, trait, enum (PHP 8+), function, method, `__construct`, property, constant, use; handles `$this->`, `self::`, `static::`, `parent::`, and `new Foo(...)` → `Foo.__construct` |
 
 ## Edge Types
 
@@ -607,7 +636,8 @@ Relationship types: `CALLS`, `CONTAINS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `RE
 | `CONTAINS` | Parent-child hierarchy | Rust only (via explicit edges); all others use `parent_id` |
 | `REFERENCES` | `new Type()` constructor calls | C# and Java |
 | `OVERRIDES` | Method overrides a parent-class method | Emitted where resolver can determine override relationships |
-| `HANDLES_ROUTE` | Handler symbol → `Route` node | Emitted by the route extractor for Express, NestJS, FastAPI, Spring, ASP.NET, Axum, Actix, chi/echo, etc. |
+| `HANDLES_ROUTE` | Handler symbol → `Route` node | Emitted by the route extractor for Express, NestJS, FastAPI, Spring, ASP.NET, Axum, Actix, chi/echo, Laravel, Slim, Symfony, plus file-based routes (Next.js, Remix, Nuxt, SvelteKit). |
+| `FETCHES` | Client-side fetch site → `Route` node | `fetch()` / `axios.<verb>()` / `useSWR()` link to a server route by `<METHOD> <path>`. A post-pass synthesizes a matching cross-boundary `CALLS` edge so `blast-radius` walks frontend→backend in one query. JS/TS only today. |
 | `STEP_IN_PROCESS` | Symbol → `Process` node | Each step in a traced execution flow; `source_line` carries the 1-based step index |
 | `ENTRY_POINT_OF` | Entry-point symbol → `Process` node | Marks the root of a process |
 
