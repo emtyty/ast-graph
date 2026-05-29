@@ -31,6 +31,7 @@ pub fn parse_project(root: &Path) -> Result<CodeGraph> {
 /// Parse an entire project directory using the given options.
 pub fn parse_project_with_options(root: &Path, options: &ParseOptions) -> Result<CodeGraph> {
     let root = root.canonicalize()?;
+    let base = root.parent().unwrap_or(&root).to_path_buf();
     let mut graph = CodeGraph::new(root.clone());
 
     info!("Discovering source files in {}", root.display());
@@ -42,7 +43,8 @@ pub fn parse_project_with_options(root: &Path, options: &ParseOptions) -> Result
     let results: Vec<(std::path::PathBuf, ExtractResult)> = files
         .par_iter()
         .filter_map(|file| {
-            let result = parse_single_file(&file.path, file.language);
+            let abs_path = base.join(&file.path);
+            let result = parse_single_file(&abs_path, &file.path, file.language);
             match result {
                 Ok(mut extract) => {
                     apply_options(&mut extract, options);
@@ -82,8 +84,11 @@ pub fn parse_project_with_options(root: &Path, options: &ParseOptions) -> Result
 }
 
 /// Parse a single file and extract symbols.
-pub fn parse_single_file(path: &Path, language: Language) -> Result<ExtractResult> {
-    let source = std::fs::read(path)?;
+///
+/// `abs_path` is used to read the file from disk; `file_path` is the path
+/// stored in every extracted `SymbolNode` (should be relative to the project root).
+pub fn parse_single_file(abs_path: &Path, file_path: &Path, language: Language) -> Result<ExtractResult> {
+    let source = std::fs::read(abs_path)?;
     let extractor = get_extractor(language);
 
     let mut parser = tree_sitter::Parser::new();
@@ -91,9 +96,9 @@ pub fn parse_single_file(path: &Path, language: Language) -> Result<ExtractResul
 
     let tree = parser
         .parse(&source, None)
-        .ok_or_else(|| anyhow::anyhow!("tree-sitter failed to parse {}", path.display()))?;
+        .ok_or_else(|| anyhow::anyhow!("tree-sitter failed to parse {}", abs_path.display()))?;
 
-    let mut result = extractor.extract(&source, &tree, path);
+    let mut result = extractor.extract(&source, &tree, file_path);
 
     // Post-pass: route extraction. Adds Route nodes + HandlesRoute raw edges
     // for any HTTP route declarations in this file.
@@ -101,7 +106,7 @@ pub fn parse_single_file(path: &Path, language: Language) -> Result<ExtractResul
     let mut extra_edges: Vec<RawEdge> = Vec::new();
     crate::routes::extract_routes(
         &source,
-        path,
+        file_path,
         language,
         &result.symbols,
         &mut extra_symbols,
@@ -135,6 +140,7 @@ pub fn incremental_update_with_options(
     options: &ParseOptions,
 ) -> Result<IncrementalStats> {
     let root = root.canonicalize()?;
+    let base = root.parent().unwrap_or(&root).to_path_buf();
     let files = discover_files(&root);
     let current_hashes = build_hash_map(&files);
 
@@ -168,10 +174,11 @@ pub fn incremental_update_with_options(
 
     let results: Vec<(std::path::PathBuf, ExtractResult)> = to_parse
         .par_iter()
-        .filter_map(|(path, lang)| {
-            parse_single_file(path, *lang).ok().map(|mut r| {
+        .filter_map(|(rel_path, lang)| {
+            let abs_path = base.join(rel_path);
+            parse_single_file(&abs_path, rel_path, *lang).ok().map(|mut r| {
                 apply_options(&mut r, options);
-                (path.clone(), r)
+                (rel_path.clone(), r)
             })
         })
         .collect();
