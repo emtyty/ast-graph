@@ -33,8 +33,10 @@ pub fn discover_files(root: &Path) -> Vec<DiscoveredFile> {
         if let Some(language) = Language::from_extension(ext) {
             if let Ok(contents) = std::fs::read(path) {
                 let hash = hash_bytes(&contents);
+                let base = root.parent().unwrap_or(root);
+                let rel_path = path.strip_prefix(base).unwrap_or(path);
                 files.push(DiscoveredFile {
-                    path: path.to_path_buf(),
+                    path: rel_path.to_path_buf(),
                     language,
                     hash,
                 });
